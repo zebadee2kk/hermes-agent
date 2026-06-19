@@ -899,6 +899,10 @@ export interface Translations {
     projectEmpty: string
     projects: {
       sectionLabel: string
+      savedProjects: string
+      detectedRepos: string
+      recentSessions: string
+      workLanes: string
       newButton: string
       createTitle: string
       createDesc: string

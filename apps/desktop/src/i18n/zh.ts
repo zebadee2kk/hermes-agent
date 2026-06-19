@@ -1358,6 +1358,10 @@ export const zh: Translations = {
     projectEmpty: '暂无会话',
     projects: {
       sectionLabel: '项目',
+      savedProjects: '项目',
+      detectedRepos: '检测到的仓库',
+      recentSessions: '最近会话',
+      workLanes: '工作分组',
       newButton: '新建项目',
       createTitle: '新建项目',
       createDesc: '为工作区命名并添加一个或多个文件夹。',

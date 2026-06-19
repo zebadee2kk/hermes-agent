@@ -1518,6 +1518,7 @@ function SidebarSessionsSection({
   onReorderWorktree,
   dndSensors
 }: SidebarSessionsSectionProps) {
+  const { t } = useI18n()
   const sectionOpen = collapsible ? open : true
   const hasTreeSessions = Boolean(tree?.some(parent => parent.sessionCount > 0))
   const hasGroupedSessions = Boolean(groups?.some(group => group.sessions.length > 0))
@@ -1598,13 +1599,13 @@ function SidebarSessionsSection({
       <>
         {explicit.length > 0 && (
           <>
-            {auto.length > 0 && <ProjectOverviewSectionTitle label="Projects" />}
+            {auto.length > 0 && <ProjectOverviewSectionTitle label={t.sidebar.projects.savedProjects} />}
             {rows(explicit)}
           </>
         )}
         {auto.length > 0 && (
           <>
-            {explicit.length > 0 && <ProjectOverviewSectionTitle label="Detected repositories" />}
+            {explicit.length > 0 && <ProjectOverviewSectionTitle label={t.sidebar.projects.detectedRepos} />}
             {rows(auto)}
           </>
         )}
@@ -1997,9 +1998,14 @@ function projectIcon(project: SidebarProjectTree) {
   return <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="folder-library" size="0.75rem" />
 }
 
-function ProjectOverviewSectionTitle({ label }: { label: string }) {
+function ProjectOverviewSectionTitle({ label, compact = false }: { label: string; compact?: boolean }) {
   return (
-    <div className="px-2 pb-0.5 pt-2 text-[0.625rem] tracking-wide text-(--ui-text-tertiary) uppercase">
+    <div
+      className={cn(
+        'px-2 pb-0.5 text-[0.625rem] tracking-wide text-(--ui-text-tertiary) uppercase',
+        compact ? 'pt-1' : 'pt-2'
+      )}
+    >
       {label}
     </div>
   )
@@ -2050,7 +2056,10 @@ function ProjectOverviewRow({ project, onEnter, onNewSession, renderRows, active
         {!project.isNoProject && <ProjectMenu isActive={isActive} project={project} />}
       </div>
       {preview.length > 0 && (
-        <div className="grid grid-cols-[minmax(0,1fr)] gap-px pb-1 pl-4">{renderRows?.(preview)}</div>
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-px pb-1 pl-4">
+          <ProjectOverviewSectionTitle compact label={s.projects.recentSessions} />
+          {renderRows?.(preview)}
+        </div>
       )}
     </div>
   )
@@ -2069,6 +2078,8 @@ function EnteredProjectContent({
   renderRows: (sessions: SessionInfo[]) => React.ReactNode
   onNewSession?: (path: null | string) => void
 }) {
+  const { t } = useI18n()
+
   if (!project.repos.length) {
     return null
   }
@@ -2077,6 +2088,7 @@ function EnteredProjectContent({
 
   return (
     <>
+      <ProjectOverviewSectionTitle compact label={t.sidebar.projects.workLanes} />
       {project.repos.map(repo => (
         <RepoFlatSection
           key={repo.id}

@@ -1254,6 +1254,10 @@ export const zhHant = defineLocale({
     projectEmpty: '尚無工作階段',
     projects: {
       sectionLabel: '專案',
+      savedProjects: '專案',
+      detectedRepos: '偵測到的儲存庫',
+      recentSessions: '最近工作階段',
+      workLanes: '工作分組',
       newButton: '新增專案',
       createTitle: '新增專案',
       createDesc: '為工作區命名並新增一個或多個資料夾。',

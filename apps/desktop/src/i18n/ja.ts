@@ -1300,6 +1300,10 @@ export const ja = defineLocale({
     projectEmpty: 'セッションはまだありません',
     projects: {
       sectionLabel: 'プロジェクト',
+      savedProjects: 'プロジェクト',
+      detectedRepos: '検出されたリポジトリ',
+      recentSessions: '最近のセッション',
+      workLanes: '作業レーン',
       newButton: '新規プロジェクト',
       createTitle: '新規プロジェクト',
       createDesc: 'ワークスペースに名前を付け、1つ以上のフォルダを追加します。',

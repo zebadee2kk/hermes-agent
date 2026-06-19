@@ -1171,6 +1171,10 @@ export const en: Translations = {
     projectEmpty: 'No sessions yet',
     projects: {
       sectionLabel: 'Projects',
+      savedProjects: 'Projects',
+      detectedRepos: 'Detected repositories',
+      recentSessions: 'Recent sessions',
+      workLanes: 'Work lanes',
       newButton: 'New project',
       createTitle: 'New project',
       createDesc: 'Name a workspace and add one or more folders.',
