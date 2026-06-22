@@ -1995,6 +1995,23 @@ class TelegramAdapter(BasePlatformAdapter):
 
             # Build the application
             builder = Application.builder().token(self.config.token)
+            # --- #583 Layer 1: proactive per-chat flood pacing (AIORateLimiter) ---
+            # Telegram enforces ~1 msg/s per chat; without pacing, bursts (agent storms,
+            # restart-flush) trip flood control and ban the bot. AIORateLimiter queues +
+            # paces sends per chat_id and transparently retries short RetryAfters.
+            # Opt out: HERMES_TELEGRAM_RATE_LIMIT=0. Needs python-telegram-bot[rate-limiter].
+            if os.getenv("HERMES_TELEGRAM_RATE_LIMIT", "1").strip().lower() not in {"0", "false", "no", "off"}:
+                try:
+                    from telegram.ext import AIORateLimiter as _AIORateLimiter
+                    builder = builder.rate_limiter(
+                        _AIORateLimiter(max_retries=int(os.getenv("HERMES_TELEGRAM_RL_MAX_RETRIES", "3")))
+                    )
+                    logger.info("[%s] Telegram AIORateLimiter enabled (per-chat pacing)", self.name)
+                except Exception as _rl_err:
+                    logger.warning(
+                        "[%s] AIORateLimiter unavailable (%s); install python-telegram-bot[rate-limiter]. "
+                        "Proceeding WITHOUT proactive pacing.", self.name, _rl_err,
+                    )
             custom_base_url = self.config.extra.get("base_url")
             if custom_base_url:
                 builder = builder.base_url(custom_base_url)
@@ -2557,6 +2574,16 @@ class TelegramAdapter(BasePlatformAdapter):
                         if retry_after is not None or "retry after" in str(send_err).lower():
                             if _send_attempt < 2:
                                 wait = float(retry_after) if retry_after is not None else 1.0
+                                # --- #583 Layer 2: do not sleep-and-retry long flood bans ---
+                                # A long retry_after means a per-chat ban; sleeping it holds a coroutine and
+                                # re-bursts near expiry, re-tripping the ban. Fail fast above the inline cap
+                                # (matches the edit path); only short waits are retried inline.
+                                if wait > float(os.getenv("HERMES_TELEGRAM_FLOOD_MAX_WAIT", "5")):
+                                    logger.warning(
+                                        "[%s] Telegram flood ban retry_after=%.1fs exceeds inline cap; "
+                                        "failing fast (no replay) to avoid re-tripping.", self.name, wait,
+                                    )
+                                    raise
                                 logger.warning(
                                     "[%s] Telegram flood control on send (attempt %d/3), retrying in %.1fs: %s",
                                     self.name,
