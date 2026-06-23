@@ -182,7 +182,13 @@ DEFAULT_FALLBACK_CONTEXT = CONTEXT_PROBE_TIERS[0]
 # Minimum context length required to run Hermes Agent.  Models with fewer
 # tokens cannot maintain enough working memory for tool-calling workflows.
 # Sessions, model switches, and cron jobs should reject models below this.
-MINIMUM_CONTEXT_LENGTH = 64_000
+#
+# LOCAL CARRY (hermes-mgmt #626): lowered default 64_000 -> 32_000 so Qwen2.5-7B
+# (32K-native, the best-scoring small tool-caller — 12/12 in live bake-off vs
+# llama3.1:8b 9/12) can serve as the local primary on mac-ai-server (M1 16GB).
+# The 64K floor blocked every strong small tool-caller (qwen2.5/qwen3 are
+# 32K-capped in ollama). Env-overridable; re-applied across `hermes update`.
+MINIMUM_CONTEXT_LENGTH = int(os.getenv("HERMES_MIN_CONTEXT_LENGTH", "32000"))
 
 # Short-lived in-process cache for local-server context probes. Bounds the
 # probe rate when the new local-endpoint live-probe paths (reconcile-on-hit +
