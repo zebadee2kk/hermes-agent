@@ -1480,10 +1480,12 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # answering, so "what model are you?" doesn't report the primary.
         rewrite_prompt_model_identity(agent, fb_model, fb_provider)
 
-        agent._buffer_status(
-            f"🔄 Primary model failed — switching to fallback: "
+        notify_msg = (
+            f"🔄 Model unavailable — automatically switched to fallback: "
             f"{fb_model} via {fb_provider}"
         )
+        agent._emit_status(notify_msg)
+        agent._buffer_status(notify_msg)
         logger.info(
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
