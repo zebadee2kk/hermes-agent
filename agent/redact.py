@@ -118,6 +118,17 @@ _ENV_ASSIGN_RE = re.compile(
     rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
 )
 
+# Dotenv-style credential lines: ``KEY=value`` / ``export KEY=value`` where the
+# ALL-CAPS key contains a secret-ish word. Masks the ENTIRE remainder of the
+# line — _ENV_ASSIGN_RE's ``(\S+)`` value group stops at the first space, so a
+# quoted multi-word value (``N8N_MCP_AUTHORIZATION="Bearer <token>"``) kept its
+# token visible after the mask (hermes-mgmt#737, leak instance 2). Applied only
+# when the text is KNOWN env-file/env-dump content (``env_assign=True``), never
+# on prose or code, where to-end-of-line masking would be far too greedy.
+_DOTENV_LINE_RE = re.compile(
+    rf"(?m)^([ \t]*(?:export[ \t]+)?[A-Z0-9_]*{_SECRET_ENV_NAMES}[A-Z0-9_]*)[ \t]*=[ \t]*(.+)$"
+)
+
 # Lowercase / dotted / hyphenated config keys from config files
 # (application.properties, .env, YAML-ish dumps): ``spring.datasource.password=secret``,
 # ``app.api.key=xyz``, ``password=secret``. The uppercase _ENV_ASSIGN_RE above
@@ -484,6 +495,7 @@ def redact_sensitive_text(
     force: bool = False,
     code_file: bool = False,
     file_read: bool = False,
+    env_assign: bool = False,
 ) -> str:
     """Apply all redaction patterns to a block of text.
 
@@ -496,6 +508,14 @@ def redact_sensitive_text(
     patterns when the text is known to be source code (e.g. MAX_TOKENS=***
     constants, "apiKey": "test" fixtures). Prefix patterns, auth headers,
     private keys, DB connstrings, JWTs, and URL secrets are still redacted.
+
+    Set env_assign=True when the text is KNOWN env-file / env-dump content
+    (output of ``env``/``printenv``, a command reading a ``.env`` file, or
+    transcript recall where such output may be embedded). Runs the
+    dotenv-line pass that masks the whole value to end-of-line, catching
+    quoted multi-word values (``AUTHORIZATION="Bearer <token>"``) that the
+    generic ENV-assignment regex leaves partially visible. Composable with
+    code_file/file_read (hermes-mgmt#737).
 
     Set file_read=True for file *content* returned to the agent (read_file /
     search_files / cat). Secrets are STILL redacted — they are never exposed —
@@ -530,6 +550,13 @@ def redact_sensitive_text(
     # paths either (it's config/data, not log lines).
     if file_read:
         code_file = True
+
+    # Known env-file / env-dump content: mask secret-named KEY=value lines to
+    # end of line BEFORE any other pass, so quoted multi-word values can't
+    # leak their tail. Runs regardless of code_file/file_read — the caller
+    # asserted this text is credential-assignment content.
+    if env_assign and "=" in text:
+        text = _DOTENV_LINE_RE.sub(lambda m: f"{m.group(1)}=***", text)
 
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
     if _has_known_prefix_substring(text):
@@ -714,7 +741,12 @@ def redact_terminal_output(
     if not output:
         return output
     code_file = not is_env_dump_command(command or "")
-    return redact_sensitive_text(output, force=force, code_file=code_file)
+    return redact_sensitive_text(
+        output,
+        force=force,
+        code_file=code_file,
+        env_assign=not code_file,
+    )
 
 
 # Substrings used to gate ``_PREFIX_RE`` execution. If none of these appear in

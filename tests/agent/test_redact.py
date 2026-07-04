@@ -810,6 +810,14 @@ class TestTerminalOutputRedaction:
         assert "abc123randomopaquetokenvalue999" not in red
         assert "HOME=/home/u" in red
 
+    def test_env_dump_masks_quoted_secret_assignment(self):
+        from agent.redact import redact_terminal_output
+        out = 'N8N_MCP_AUTHORIZATION="Bearer live-token-should-not-leak"\nPATH=/usr/bin'
+        red = redact_terminal_output(out, "env")
+        assert "live-token-should-not-leak" not in red
+        assert 'N8N_MCP_AUTHORIZATION=***' in red
+        assert 'PATH=/usr/bin' in red
+
     def test_non_env_command_preserves_source_false_positives(self):
         from agent.redact import redact_terminal_output
         # code_file path: MAX_TOKENS=100 is source, must survive; real sk- masked.
