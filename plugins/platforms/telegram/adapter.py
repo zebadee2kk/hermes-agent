@@ -2758,6 +2758,25 @@ class TelegramAdapter(BasePlatformAdapter):
 
             # Build the application
             builder = Application.builder().token(self.config.token)
+            # --- #583 Layer 1 (carried patch): proactive per-chat flood pacing ---
+            # Telegram enforces ~1 msg/s per chat; without pacing, bursts (agent
+            # storms, restart-flush) trip flood control and can ban the bot for
+            # hours (realized 2026-06-28). AIORateLimiter queues + paces sends per
+            # chat_id and transparently retries short RetryAfters. Reactive
+            # retry_after handling exists upstream; this adds the proactive layer.
+            # Opt out: HERMES_TELEGRAM_RATE_LIMIT=0.
+            if os.getenv("HERMES_TELEGRAM_RATE_LIMIT", "1").strip().lower() not in {"0", "false", "no", "off"}:
+                try:
+                    from telegram.ext import AIORateLimiter as _AIORateLimiter
+                    builder = builder.rate_limiter(
+                        _AIORateLimiter(max_retries=int(os.getenv("HERMES_TELEGRAM_RL_MAX_RETRIES", "3")))
+                    )
+                    logger.info("[%s] Telegram AIORateLimiter enabled (per-chat pacing)", self.name)
+                except Exception as _rl_err:
+                    logger.warning(
+                        "[%s] AIORateLimiter unavailable (%s); install python-telegram-bot[rate-limiter].",
+                        self.name, _rl_err,
+                    )
             custom_base_url = self.config.extra.get("base_url")
             if custom_base_url:
                 builder = builder.base_url(custom_base_url)
