@@ -1022,6 +1022,67 @@ def test_auth_list_shows_auth_failure_when_exhausted_entry_is_unauthorized(monke
     assert "left" not in out
 
 
+def test_auth_list_shows_billing_exhausted_not_auth_failure_for_xai_403(monkeypatch, capsys):
+    # Regression test for #706: xAI returns a 403 whose body says the account
+    # "used all available credits or reached its monthly spending limit".
+    # That is a billing problem, not a broken/expired credential, and must
+    # not be reported as "auth failed ... re-auth may be required".
+    from hermes_cli.auth_commands import auth_list_command
+
+    class _Entry:
+        id = "cred-1"
+        label = "xai-oauth-1"
+        auth_type = "oauth"
+        source = "manual:device_code"
+        last_status = "exhausted"
+        last_error_code = 403
+        last_error_reason = "forbidden"
+        last_error_message = (
+            "Your team has used all available credits or reached its "
+            "monthly spending limit."
+        )
+        last_status_at = 1000.0
+
+    class _Pool:
+        def entries(self):
+            return [_Entry()]
+
+        def peek(self):
+            return None
+
+    monkeypatch.setattr("hermes_cli.auth_commands.load_pool", lambda provider: _Pool())
+    monkeypatch.setattr("hermes_cli.auth_commands.time.time", lambda: 1030.0)
+
+    class _Args:
+        provider = "xai-oauth"
+
+    auth_list_command(_Args())
+
+    out = capsys.readouterr().out
+    assert "billing exhausted" in out
+    assert "(403)" in out
+    assert "top up credits" in out
+    assert "auth failed" not in out
+    assert "re-auth may be required" not in out
+    assert "left" not in out
+
+
+def test_classify_exhausted_status_billing_before_auth_code_check():
+    # The billing check must run before the blanket `code in {401, 403}`
+    # auth-failure check, otherwise every 403 is classified as auth failure
+    # regardless of what the response body says.
+    from hermes_cli.auth_commands import _classify_exhausted_status
+
+    class _Entry:
+        last_error_code = 403
+        last_error_reason = None
+        last_error_message = "used all available credits or reached its monthly spending limit"
+
+    label, show_retry_window = _classify_exhausted_status(_Entry())
+    assert label == "billing exhausted"
+    assert show_retry_window is False
+
+
 def test_auth_list_prefers_explicit_reset_time(monkeypatch, capsys):
     from hermes_cli.auth_commands import auth_list_command
 
