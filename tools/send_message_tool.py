@@ -138,6 +138,94 @@ async def _send_telegram_message_with_retry(bot, *, attempts: int = 3, **kwargs)
             await asyncio.sleep(delay)
 
 
+_DISCORD_TRANSIENT_ERROR_RE = re.compile(
+    r"ssl|certificate|cannot connect to host|connection reset|"
+    r"server disconnected|timed? ?out|temporary failure|connection aborted",
+    re.IGNORECASE,
+)
+
+
+def _discord_retry_delay(error_text: str, attempt: int) -> float | None:
+    """Return a backoff delay (seconds) for a transient Discord send error,
+    or ``None`` if the error is not retryable.
+
+    ``plugins.platforms.discord.adapter._standalone_send`` catches every
+    exception internally and returns ``{"error": "Discord send failed: ..."}"``
+    rather than letting it propagate, so (unlike the Telegram path) retry
+    decisions here are made on the returned error *text* rather than on an
+    exception type. This matches the same class of transient TLS/connection
+    failure the Telegram retry path (above) handles via exception type
+    (``aiohttp.ClientConnectorCertificateError``, ``aiohttp.ClientConnectorError``,
+    ``ssl.SSLError``) -- see #765, where a one-day-only
+    ``SSLCertVerificationError: ... Hostname mismatch`` to discord.com
+    silently dropped a cron report with no retry.
+    """
+    if not error_text:
+        return None
+    if _DISCORD_TRANSIENT_ERROR_RE.search(error_text):
+        return float(2 ** attempt)
+    return None
+
+
+async def _send_discord_message_with_retry(send_fn, *, attempts: int = 3, **kwargs):
+    """Retry a Discord standalone-send call with exponential backoff on
+    transient TLS/connection failures (mirrors
+    ``_send_telegram_message_with_retry`` above).
+
+    ``send_fn`` behaves like
+    ``plugins.platforms.discord.adapter._standalone_send``: it normally does
+    not raise, it returns ``{"error": ...}`` on failure (see
+    ``_discord_retry_delay``). Real exceptions of the same transient
+    TLS/connection classes are also caught defensively, in case a future
+    refactor lets one escape.
+    """
+    try:
+        import aiohttp
+        _transient_exc_types: tuple = (
+            aiohttp.ClientConnectorCertificateError,
+            aiohttp.ClientConnectorError,
+            ssl.SSLError,
+        )
+    except ImportError:
+        _transient_exc_types = (ssl.SSLError,)
+
+    last_result = None
+    for attempt in range(attempts):
+        try:
+            result = await send_fn(**kwargs)
+        except _transient_exc_types as exc:
+            if attempt >= attempts - 1:
+                raise
+            delay = float(2 ** attempt)
+            logger.warning(
+                "Transient Discord send failure (attempt %d/%d), retrying in %.1fs: %s",
+                attempt + 1,
+                attempts,
+                delay,
+                _sanitize_error_text(exc),
+            )
+            await asyncio.sleep(delay)
+            continue
+
+        error_text = result.get("error") if isinstance(result, dict) else None
+        if not error_text:
+            return result
+        delay = _discord_retry_delay(error_text, attempt)
+        if delay is None or attempt >= attempts - 1:
+            return result
+        logger.warning(
+            "Transient Discord send failure (attempt %d/%d), retrying in %.1fs: %s",
+            attempt + 1,
+            attempts,
+            delay,
+            _sanitize_error_text(error_text),
+        )
+        last_result = result
+        await asyncio.sleep(delay)
+
+    return last_result
+
+
 SEND_MESSAGE_SCHEMA = {
     "name": "send_message",
     "description": (
@@ -817,10 +905,14 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         last_result = None
         for i, chunk in enumerate(chunks):
             is_last = (i == len(chunks) - 1)
-            result = await entry.standalone_sender_fn(
-                pconfig,
-                chat_id,
-                chunk,
+            # #765: a transient TLS/connection blip to discord.com used to
+            # silently drop the whole send with no retry (unlike Telegram,
+            # above). Mirror that retry-with-backoff behavior here.
+            result = await _send_discord_message_with_retry(
+                entry.standalone_sender_fn,
+                pconfig=pconfig,
+                chat_id=chat_id,
+                message=chunk,
                 thread_id=thread_id,
                 media_files=media_files if is_last else [],
             )
