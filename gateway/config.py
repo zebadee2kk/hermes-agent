@@ -1620,9 +1620,23 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     api_server_port = os.getenv("API_SERVER_PORT")
     api_server_host = os.getenv("API_SERVER_HOST")
     if api_server_enabled or api_server_key:
-        if Platform.API_SERVER not in config.platforms:
+        _api_server_preexisting = Platform.API_SERVER in config.platforms
+        if not _api_server_preexisting:
             config.platforms[Platform.API_SERVER] = PlatformConfig()
-        config.platforms[Platform.API_SERVER].enabled = True
+        # Bug (#735): API_SERVER_KEY is a globally-loaded env var (every
+        # process reads ~/.hermes/.env, including profile gateways with
+        # api_server.enabled: false in their own config.yaml). Its mere
+        # presence used to unconditionally force enabled=True here,
+        # silently re-enabling api_server on profiles that explicitly
+        # disabled it -- letting a profile win the scoped port-lock race
+        # against main instead of losing it as designed. Only force-enable
+        # when either (a) this is a brand-new entry with no YAML mention at
+        # all (env-var-only configuration, the original use case), or (b)
+        # the operator set the explicit API_SERVER_ENABLED=true env var,
+        # which should win over a YAML disable same as any other explicit
+        # override. Merely having a key configured must not imply "enabled".
+        if not _api_server_preexisting or api_server_enabled:
+            config.platforms[Platform.API_SERVER].enabled = True
         if api_server_key:
             config.platforms[Platform.API_SERVER].extra["key"] = api_server_key
         if api_server_cors_origins:
