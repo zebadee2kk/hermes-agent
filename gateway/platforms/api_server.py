@@ -4750,7 +4750,20 @@ class APIServerAdapter(BasePlatformAdapter):
         if not self._api_key_passes_startup_guard():
             return False
 
+        # Scoped port lock (#735): the OpenAI-compatible API server binds a
+        # single machine-wide port (default 8642). ``platforms.api_server.
+        # enabled: false`` is not honored by profile gateways, so a profile
+        # gateway would otherwise race the raw port bind and steal 8642 from
+        # the main gateway. Acquire the same scoped lock telegram/discord/
+        # signal use so exactly one gateway owns the port; the loser fails
+        # fast here (retryable fatal) instead of at bind time.
+        if not self._acquire_platform_lock(
+            'api-server-port', str(self._port), f'API server port {self._port}'
+        ):
+            return False
+
         if not self._port_is_available():
+            self._release_platform_lock()
             return False
 
         try:
@@ -4855,6 +4868,10 @@ class APIServerAdapter(BasePlatformAdapter):
 
         except Exception as e:
             logger.error("[%s] Failed to start API server: %s", self.name, e)
+            # Release the scoped port lock (#735) so a later reconnect (or a
+            # standby profile gateway) can acquire it — the bind failed, so we
+            # do not own the port.
+            self._release_platform_lock()
             return False
 
     async def disconnect(self) -> None:
@@ -4884,6 +4901,8 @@ class APIServerAdapter(BasePlatformAdapter):
             await self._runner.cleanup()
             self._runner = None
         self._app = None
+        # Release the scoped port lock (#735) so another gateway may take 8642.
+        self._release_platform_lock()
         logger.info("[%s] API server stopped", self.name)
 
     async def send(
