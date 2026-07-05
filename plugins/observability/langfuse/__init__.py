@@ -22,22 +22,26 @@ Optional env vars:
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 try:
-    from langfuse import Langfuse, propagate_attributes
+    import langfuse as _langfuse_module
 except Exception:  # pragma: no cover - fail-open when optional dep is missing
-    Langfuse = None
-    propagate_attributes = None
+    _langfuse_module = None
+
+Langfuse = getattr(_langfuse_module, "Langfuse", None)
+propagate_attributes = getattr(_langfuse_module, "propagate_attributes", None)
 
 
 @dataclass
@@ -206,8 +210,17 @@ def _get_langfuse() -> Optional[Langfuse]:
     kwargs: Dict[str, Any] = {
         "public_key": public_key,
         "secret_key": secret_key,
-        "base_url": base_url,
     }
+    try:
+        langfuse_params = inspect.signature(Langfuse).parameters if Langfuse is not None else {}
+    except Exception:
+        langfuse_params = {}
+    if "base_url" in langfuse_params:
+        kwargs["base_url"] = base_url
+    elif "host" in langfuse_params:
+        kwargs["host"] = base_url
+    else:
+        kwargs["base_url"] = base_url
     if environment:
         kwargs["environment"] = environment
     if release:
@@ -219,6 +232,7 @@ def _get_langfuse() -> Optional[Langfuse]:
             logger.warning("Invalid HERMES_LANGFUSE_SAMPLE_RATE=%r", sample_rate)
 
     try:
+        assert Langfuse is not None
         _LANGFUSE_CLIENT = Langfuse(**kwargs)
     except Exception as exc:  # pragma: no cover - fail-open
         logger.warning("Could not initialize Langfuse client: %s", exc)
@@ -603,7 +617,16 @@ def _usage_and_cost(response: Any, *, provider: str, api_mode: str, model: str, 
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "") -> TraceState:
-    trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{task_id or task_key}")
+    seed = f"{session_id or 'sessionless'}::{task_id or task_key}"
+    create_trace_id = getattr(client, "create_trace_id", None)
+    if callable(create_trace_id):
+        try:
+            trace_id = create_trace_id(seed=seed)
+        except TypeError:
+            trace_id = create_trace_id(seed)
+    else:
+        trace_id = uuid.uuid5(uuid.NAMESPACE_URL, seed).hex
+    trace_id = str(trace_id)
     trace_input = _extract_last_user_message(messages)
     metadata = {
         "source": "hermes",
@@ -621,13 +644,24 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     if session_id:
         trace_ctx["session_id"] = session_id
 
-    if propagate_attributes is not None:
-        try:
-            with propagate_attributes(
-                session_id=session_id or task_key,
-                trace_name="Hermes turn",
-                tags=["hermes", "langfuse"],
-            ):
+    if hasattr(client, "start_as_current_observation"):
+        if propagate_attributes is not None:
+            try:
+                with propagate_attributes(
+                    session_id=session_id or task_key,
+                    trace_name="Hermes turn",
+                    tags=["hermes", "langfuse"],
+                ):
+                    root_ctx = client.start_as_current_observation(
+                        trace_context=trace_ctx,
+                        name="Hermes turn",
+                        as_type="chain",
+                        input=trace_input,
+                        metadata=metadata,
+                        end_on_exit=False,
+                    )
+                    root_span = root_ctx.__enter__()
+            except Exception:
                 root_ctx = client.start_as_current_observation(
                     trace_context=trace_ctx,
                     name="Hermes turn",
@@ -637,7 +671,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
                     end_on_exit=False,
                 )
                 root_span = root_ctx.__enter__()
-        except Exception:
+        else:
             root_ctx = client.start_as_current_observation(
                 trace_context=trace_ctx,
                 name="Hermes turn",
@@ -648,18 +682,20 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
             )
             root_span = root_ctx.__enter__()
     else:
-        root_ctx = client.start_as_current_observation(
-            trace_context=trace_ctx,
+        root_ctx = None
+        root_span = client.trace(
+            id=trace_id,
             name="Hermes turn",
-            as_type="chain",
+            session_id=session_id or None,
+            version=_env("HERMES_LANGFUSE_RELEASE") or _env("LANGFUSE_RELEASE") or None,
             input=trace_input,
             metadata=metadata,
-            end_on_exit=False,
+            tags=["hermes", "langfuse"],
         )
-        root_span = root_ctx.__enter__()
 
     try:
-        root_span.set_trace_io(input=trace_input)
+        if hasattr(root_span, "set_trace_io"):
+            root_span.set_trace_io(input=trace_input)
     except Exception:
         pass
 
@@ -670,14 +706,30 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
 def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, as_type: str,
                              input_value: Any, metadata: Optional[dict] = None,
                              model: Optional[str] = None, model_parameters: Optional[dict] = None) -> Any:
-    return state.root_span.start_observation(
-        name=name,
-        as_type=as_type,
-        input=input_value,
-        metadata=metadata or {},
-        model=model,
-        model_parameters=model_parameters,
-    )
+    if hasattr(state.root_span, "start_observation"):
+        return state.root_span.start_observation(
+            name=name,
+            as_type=as_type,
+            input=input_value,
+            metadata=metadata or {},
+            model=model,
+            model_parameters=model_parameters,
+        )
+    if as_type == "generation" and hasattr(state.root_span, "generation"):
+        return state.root_span.generation(
+            name=name,
+            input=input_value,
+            metadata=metadata or {},
+            model=model,
+            model_parameters=model_parameters,
+        )
+    if hasattr(state.root_span, "span"):
+        return state.root_span.span(
+            name=name,
+            input=input_value,
+            metadata=metadata or {},
+        )
+    raise AttributeError("Langfuse client does not support trace observations")
 
 
 def _end_observation(observation: Any, *, output: Any = None, metadata: Optional[dict] = None,
@@ -694,9 +746,17 @@ def _end_observation(observation: Any, *, output: Any = None, metadata: Optional
             update_kwargs["usage_details"] = usage_details
         if cost_details:
             update_kwargs["cost_details"] = cost_details
+        if output is not None and hasattr(observation, "set_trace_io"):
+            try:
+                observation.set_trace_io(output=output)
+            except Exception:
+                pass
         if update_kwargs:
             observation.update(**update_kwargs)
-        observation.end()
+        elif output is not None and hasattr(observation, "update"):
+            observation.update(output=output)
+        if hasattr(observation, "end"):
+            observation.end()
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"end observation failed: {exc}")
 
@@ -729,7 +789,7 @@ def _evict_stale_locked() -> None:
     for key, state in stale:
         _TRACE_STATE.pop(key, None)
         try:
-            state.root_span.end()
+            _end_observation(state.root_span)
         except Exception as exc:  # pragma: no cover - fail-open
             _debug(f"evict stale trace failed: {exc}")
 
@@ -753,10 +813,7 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
             for observation in queue:
                 _end_observation(observation)
         final_output = _merge_trace_output(output, state)
-        if final_output is not None:
-            state.root_span.set_trace_io(output=final_output)
-            state.root_span.update(output=final_output)
-        state.root_span.end()
+        _end_observation(state.root_span, output=final_output)
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
     finally:

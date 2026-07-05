@@ -431,6 +431,33 @@ class TestTurnTraceIsolation:
 # ---------------------------------------------------------------------------
 
 
+class _FakeLangfuseObservation:
+    def __init__(self, events, kind="span"):
+        self._events = events
+        self._kind = kind
+
+    def update(self, **kwargs):
+        self._events.append((self._kind, "update", kwargs))
+
+    def end(self, **kwargs):
+        self._events.append((self._kind, "end", kwargs))
+
+    def set_trace_io(self, **kwargs):
+        self._events.append((self._kind, "set_trace_io", kwargs))
+
+    def start_observation(self, **kwargs):
+        self._events.append((self._kind, "start_observation", kwargs))
+        return _FakeLangfuseObservation(self._events, kind=kwargs.get("as_type", "span"))
+
+    def span(self, **kwargs):
+        self._events.append((self._kind, "span", kwargs))
+        return _FakeLangfuseObservation(self._events, kind="span")
+
+    def generation(self, **kwargs):
+        self._events.append((self._kind, "generation", kwargs))
+        return _FakeLangfuseObservation(self._events, kind="generation")
+
+
 class _FakeLangfuse:
     """Stand-in for the real :class:`langfuse.Langfuse` so tests don't
     need the optional ``langfuse`` SDK installed.  The plugin's runtime
@@ -443,7 +470,18 @@ class _FakeLangfuse:
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+        self.events = []
         _FakeLangfuse.instances.append(self)
+
+    def create_trace_id(self, seed=None):
+        return f"trace::{seed}"
+
+    def trace(self, **kwargs):
+        self.events.append(("trace", kwargs))
+        return _FakeLangfuseObservation(self.events, kind="trace")
+
+    def flush(self):
+        pass
 
 
 class TestPlaceholderKeyDetection:
@@ -687,6 +725,98 @@ class TestPlaceholderKeyDetection:
         assert "placeholders" not in caplog.text.lower(), (
             f"Valid Langfuse keys tripped the placeholder guard: {caplog.text!r}"
         )
+
+    def test_v2_style_sdk_initializes_and_records_hooks(self, monkeypatch, caplog):
+        """The bundled plugin must keep working on Langfuse SDKs that expose
+        ``trace()`` but not the newer ``start_as_current_observation()`` API.
+        This pins the constructor fallback plus the request-scoped hook path
+        used in the live environment here."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "https://langfuse.example")
+        plugin = self._fresh_plugin()
+
+        class _V2Observation:
+            def __init__(self, events, kind):
+                self.events = events
+                self.kind = kind
+
+            def update(self, **kwargs):
+                self.events.append((self.kind, "update", kwargs))
+
+            def end(self, **kwargs):
+                self.events.append((self.kind, "end", kwargs))
+
+            def set_trace_io(self, **kwargs):
+                self.events.append((self.kind, "set_trace_io", kwargs))
+
+            def span(self, **kwargs):
+                self.events.append((self.kind, "span", kwargs))
+                return _V2Observation(self.events, kind="span")
+
+            def generation(self, **kwargs):
+                self.events.append((self.kind, "generation", kwargs))
+                return _V2Observation(self.events, kind="generation")
+
+        class _V2Client:
+            def __init__(self, public_key, secret_key, host=None, environment=None, release=None, sample_rate=None):
+                self.kwargs = {
+                    "public_key": public_key,
+                    "secret_key": secret_key,
+                    "host": host,
+                    "environment": environment,
+                    "release": release,
+                    "sample_rate": sample_rate,
+                }
+                self.events = []
+
+            def trace(self, **kwargs):
+                self.events.append(("trace", kwargs))
+                return _V2Observation(self.events, kind="trace")
+
+            def flush(self):
+                self.events.append(("flush", {}))
+
+        monkeypatch.setattr(plugin, "Langfuse", _V2Client, raising=False)
+        monkeypatch.setattr(plugin, "propagate_attributes", None, raising=False)
+        with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
+            client = plugin._get_langfuse()
+        assert isinstance(client, _V2Client)
+        assert client.kwargs["host"] == "https://langfuse.example"
+
+        plugin._TRACE_STATE.clear()
+        turn_id = "sess-1:task-1:turn1"
+        api_request_id = f"{turn_id}:api:1"
+        plugin.on_pre_llm_request(
+            task_id="task-1",
+            session_id="sess-1",
+            model="m",
+            provider="p",
+            api_mode="chat",
+            api_call_count=1,
+            request_messages=[{"role": "user", "content": "hi"}],
+            turn_id=turn_id,
+            api_request_id=api_request_id,
+        )
+        plugin.on_post_llm_call(
+            task_id="task-1",
+            session_id="sess-1",
+            model="m",
+            provider="p",
+            api_mode="chat",
+            api_call_count=1,
+            assistant_content_chars=5,
+            usage={"input_tokens": 10, "output_tokens": 5},
+            turn_id=turn_id,
+            api_request_id=api_request_id,
+        )
+
+        event_kinds = [event[1] if len(event) == 3 else event[0] for event in client.events]
+        assert "trace" in event_kinds
+        assert "generation" in event_kinds
+        assert "update" in event_kinds
+        assert "end" in event_kinds
 
 
 class TestRequestMessageCoercion:
@@ -965,7 +1095,8 @@ class TestUsageFromSanitizedResponse:
         captured = {}
 
         def fake_end_observation(obs, *, output=None, metadata=None, usage_details=None, cost_details=None):
-            captured["usage_details"] = usage_details
+            if usage_details is not None:
+                captured["usage_details"] = usage_details
 
         monkeypatch.setattr(mod, "_end_observation", fake_end_observation)
         return captured
