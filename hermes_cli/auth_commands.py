@@ -118,6 +118,23 @@ def _classify_exhausted_status(entry) -> tuple[str, bool]:
     reason = str(getattr(entry, "last_error_reason", "") or "").strip().lower()
     message = str(getattr(entry, "last_error_message", "") or "").strip().lower()
 
+    # A 403 can also mean the account has run out of credits or hit its
+    # spending limit (e.g. xAI: "used all available credits or reached its
+    # monthly spending limit") rather than a broken/expired credential —
+    # re-authenticating will not fix that. Check for this before the
+    # generic auth-failure code check below, since that check would
+    # otherwise short-circuit to "auth failed" on the status code alone.
+    # Scoped to 403 specifically (not the 429 rate-limit path, which already
+    # has its own "credits"/"quota" wording for periodic, self-resetting
+    # limits — see test_auth_list_prefers_explicit_reset_time). (#706)
+    if code == 403 and (
+        "billing" in reason
+        or "spending_limit" in reason
+        or "credit" in message
+        or "spending limit" in message
+    ):
+        return "billing exhausted", False
+
     if code == 429 or any(token in reason for token in ("rate_limit", "usage_limit", "quota", "exhausted")) or any(
         token in message for token in ("rate limit", "usage limit", "quota", "too many requests")
     ):
@@ -139,6 +156,10 @@ def _format_exhausted_status(entry) -> str:
     reason = getattr(entry, "last_error_reason", None)
     reason_text = f" {reason}" if isinstance(reason, str) and reason.strip() else ""
     code = f" ({entry.last_error_code})" if entry.last_error_code else ""
+    if label == "billing exhausted":
+        # Not a credential problem — re-authenticating won't help, and there
+        # is no automatic reset window to count down to. (#706)
+        return f" {label}{reason_text}{code} (top up credits / spending limit to restore)"
     if not show_retry_window:
         return f" {label}{reason_text}{code} (re-auth may be required)"
     exhausted_until = _exhausted_until(entry)
