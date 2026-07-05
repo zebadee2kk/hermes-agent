@@ -468,7 +468,22 @@ def _apply_profile_override() -> None:
     # would silently redirect the default gateway into that profile — yielding a
     # duplicate gateway for the active profile and no real default gateway. See
     # the "Docker & Profiles & Dashboard" report.
-    if profile_name is None and not os.environ.get("HERMES_S6_SUPERVISED_CHILD"):
+    #
+    # EXCEPTION (#801): the exact same failure mode hits a systemd-supervised
+    # deployment (e.g. `hermes-gateway.service` running bare `gateway run`
+    # alongside separate `hermes-gateway-<profile>.service` units that pass
+    # `--profile <name>` explicitly). Observed live: `active_profile` got set
+    # to a named profile (by an unrelated interactive `hermes profile use` /
+    # `hermes chat` invocation), and the *systemd-managed default* gateway
+    # then silently redirected itself into that profile's HERMES_HOME on its
+    # next restart — writing its PID/lock files into the profile's directory
+    # instead of its own, crash-looping both units until the stray file was
+    # found and deleted by hand (twice, in the same session). `INVOCATION_ID`
+    # is set by systemd for every unit activation (user or system scope, no
+    # unit-file changes required to opt in), so it's a reliable, zero-config
+    # signal that this process is a supervised slot with a fixed identity,
+    # exactly like the s6 case above.
+    if profile_name is None and not os.environ.get("HERMES_S6_SUPERVISED_CHILD") and not os.environ.get("INVOCATION_ID"):
         try:
             from hermes_constants import get_default_hermes_root
 
