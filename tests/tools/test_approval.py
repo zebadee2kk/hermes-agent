@@ -1100,10 +1100,23 @@ class TestGatewayProtection:
         assert dangerous is True
 
     def test_gateway_run_foreground_not_flagged(self):
-        """Normal foreground gateway run (as in systemd ExecStart) is fine."""
-        cmd = "python -m hermes_cli.main gateway run --replace"
+        """Normal foreground gateway run (as in systemd ExecStart) is fine.
+
+        systemd's actual ExecStart is a bare `gateway run` (no --replace) — see
+        the hermes-gateway.service override. That must NOT be flagged.
+        """
+        cmd = "python -m hermes_cli.main gateway run"
         dangerous, key, desc = detect_dangerous_command(cmd)
         assert dangerous is False
+
+    def test_gateway_run_replace_flagged(self):
+        """`gateway run --replace` kills the running gateway + agents and takes
+        over — a functional restart, so it must require approval (hermes-mgmt
+        #581 G3 gap). Plain `gateway run` (above) stays unflagged."""
+        cmd = "python -m hermes_cli.main gateway run --replace"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "replace" in desc.lower()
 
     def test_systemctl_restart_flagged(self):
         """systemctl restart kills running agents and should require approval."""
