@@ -1250,3 +1250,64 @@ class TestHomeChannelEnvOverrides:
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
             assert (home.chat_id, home.name) == expected, platform.value
+
+
+class TestApiServerEnabledGuard:
+    """#735/#871: a profile inherits API_SERVER_KEY from the main ~/.hermes/.env,
+    but that inherited key must NOT force-enable api_server on a profile that has
+    an explicit ``api_server: {enabled: false}``. Without this guard, every profile
+    gateway force-enables api_server and races the main gateway for :8642.
+    """
+
+    STRONG_KEY = "0123456789abcdef0123456789abcdef"
+
+    def test_inherited_key_does_not_override_profile_disabled(self):
+        """Pre-existing (YAML) api_server.enabled:false + inherited key only
+        (no API_SERVER_ENABLED) → stays disabled; key is still threaded in."""
+        config = GatewayConfig(
+            platforms={Platform.API_SERVER: PlatformConfig(enabled=False)}
+        )
+        with patch.dict(os.environ, {"API_SERVER_KEY": self.STRONG_KEY}, clear=True):
+            _apply_env_overrides(config)
+
+        assert config.platforms[Platform.API_SERVER].enabled is False
+        assert config.platforms[Platform.API_SERVER].extra["key"] == self.STRONG_KEY
+
+    def test_explicit_enabled_true_overrides_profile_disabled(self):
+        """An explicit API_SERVER_ENABLED=true still wins over YAML enabled:false."""
+        config = GatewayConfig(
+            platforms={Platform.API_SERVER: PlatformConfig(enabled=False)}
+        )
+        env = {"API_SERVER_KEY": self.STRONG_KEY, "API_SERVER_ENABLED": "true"}
+        with patch.dict(os.environ, env, clear=True):
+            _apply_env_overrides(config)
+
+        assert config.platforms[Platform.API_SERVER].enabled is True
+
+    def test_env_only_key_no_yaml_block_enables(self):
+        """No pre-existing api_server platform (env-var-only config): the
+        inherited key alone force-enables — preserving the main gateway's
+        legacy behavior where api_server is configured purely via env."""
+        config = GatewayConfig(platforms={})
+        with patch.dict(os.environ, {"API_SERVER_KEY": self.STRONG_KEY}, clear=True):
+            _apply_env_overrides(config)
+
+        assert Platform.API_SERVER in config.platforms
+        assert config.platforms[Platform.API_SERVER].enabled is True
+
+    def test_loaded_config_honors_profile_disabled_end_to_end(self, tmp_path, monkeypatch):
+        """Full load_gateway_config path: config.yaml disables api_server while
+        API_SERVER_KEY is inherited from env → loaded config stays disabled."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "platforms:\n  api_server:\n    enabled: false\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("API_SERVER_KEY", self.STRONG_KEY)
+        monkeypatch.delenv("API_SERVER_ENABLED", raising=False)
+
+        config = load_gateway_config()
+
+        assert config.platforms[Platform.API_SERVER].enabled is False
