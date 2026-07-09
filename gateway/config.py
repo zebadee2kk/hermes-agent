@@ -1620,9 +1620,18 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     api_server_port = os.getenv("API_SERVER_PORT")
     api_server_host = os.getenv("API_SERVER_HOST")
     if api_server_enabled or api_server_key:
-        if Platform.API_SERVER not in config.platforms:
+        # Bug (#735/#871): the mere PRESENCE of API_SERVER_KEY (inherited by every
+        # profile from the main .env) must NOT override a profile's explicit
+        # `api_server: {enabled: false}`. Only force-enable when (a) the entry is
+        # brand-new — i.e. env-var-only config with no YAML api_server block — or
+        # (b) API_SERVER_ENABLED=true was set explicitly. Otherwise, respect the
+        # pre-existing (YAML) enabled value. Without this guard, all profile
+        # gateways force-enable api_server and race the main gateway for :8642.
+        _api_server_preexisting = Platform.API_SERVER in config.platforms
+        if not _api_server_preexisting:
             config.platforms[Platform.API_SERVER] = PlatformConfig()
-        config.platforms[Platform.API_SERVER].enabled = True
+        if not _api_server_preexisting or api_server_enabled:
+            config.platforms[Platform.API_SERVER].enabled = True
         if api_server_key:
             config.platforms[Platform.API_SERVER].extra["key"] = api_server_key
         if api_server_cors_origins:
