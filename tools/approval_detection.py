@@ -360,6 +360,10 @@ DANGEROUS_PATTERNS = [
     # Gateway protection: never start gateway outside systemd management
     (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
     (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
+    # `gateway run --replace` kills the running gateway (and every agent mid-work) and takes over its
+    # port/lock: functionally a restart, so it needs the same consent as `hermes gateway restart`. The
+    # backgrounded/nohup rules above miss it because --replace runs in the foreground (hermes-mgmt #581 G3).
+    (r'\bgateway\s+run\b.*--replace\b', "replace the running hermes gateway (kills the active gateway + agents)"),
     # Self-termination protection: prevent agent from killing its own process
     (r'\b(pkill|killall)\b.*\b(hermes|gateway|cli\.py)\b', "kill hermes/gateway process (self-termination)"),
     # Self-termination via kill + $(pgrep/pidof): the substitution is opaque to the name-based
