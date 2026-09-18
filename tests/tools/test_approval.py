@@ -817,6 +817,22 @@ class TestGatewayProtection:
         ):
             assert detect_dangerous_command(variant)[0] is True, variant
 
+    def test_gateway_run_replace_foreground_detected(self):
+        """`gateway run --replace` kills the running gateway even in the foreground (#581 G3)."""
+        for cmd in (
+            "hermes gateway run --replace",
+            "hermes -p ade gateway run --replace",
+            "python -m hermes_cli.main gateway run --replace",
+            "cd ~/.hermes/hermes-agent && venv/bin/hermes gateway run -v --replace",
+        ):
+            dangerous, _key, desc = detect_dangerous_command(cmd)
+            assert dangerous is True, cmd
+            assert "replace" in desc, cmd
+
+    def test_gateway_run_without_replace_not_flagged(self):
+        for cmd in ("hermes gateway run", "hermes gateway run -v"):
+            assert detect_dangerous_command(cmd)[0] is False, cmd
+
 
     def test_systemctl_restart_flagged(self):
         """systemctl restart kills running agents and should require approval."""
