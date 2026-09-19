@@ -314,6 +314,22 @@ class TestRelevanceFloor:
 
 
 class TestAssembly:
+    def test_tool_call_arguments_schema_has_permissive_properties(self):
+        """Perplexity rejects object schemas that omit ``properties``."""
+        from tools.tool_search import bridge_tool_schemas
+
+        schemas = bridge_tool_schemas(deferred_count=1)
+        tool_call = next(
+            schema for schema in schemas
+            if schema["function"]["name"] == "tool_call"
+        )
+        call_item = tool_call["function"]["parameters"]["properties"]["calls"]["items"]
+        arguments = call_item["properties"]["arguments"]
+
+        assert arguments["type"] == "object"
+        assert arguments["properties"] == {}
+        assert arguments.get("additionalProperties", True) is True
+
     def test_no_deferrable_returns_unchanged(self):
         """Pure-core toolset: pass-through, no bridge tools added."""
         from tools.tool_search import assemble_tool_defs, ToolSearchConfig
