@@ -10,10 +10,16 @@ from typing import Any, Dict, List, Optional
 
 import hermes_yaml as yaml
 from fastapi import APIRouter, HTTPException, Query
+from yaml.nodes import MappingNode, ScalarNode
 
 from hermes_cli.config import get_config_path, read_raw_config
 from hermes_cli.web_deps import late
 from hermes_cli.web_routers._common import corrupt_store_as_status
+from hermes_cli.web_routers.config_env import (
+    DASHBOARD_SECRET_PLACEHOLDER,
+    _redact_secret_tree,
+    _restore_dashboard_secrets,
+)
 from hermes_cli.web_server_profiles import (
     _approval_mode_of, _aux_task_summary, _aux_usage_rows, _broadcast_gateway_session_info, _is_other_profile, _merge_aux_into_by_model,
 )
@@ -30,6 +36,52 @@ save_config = late("save_config", "hermes_cli.config")
 # ── Raw YAML config ──────────────────────────────────────────────────────────
 
 
+def _mapping_value(node: MappingNode, wanted: str):
+    for key_node, value_node in node.value:
+        if isinstance(key_node, ScalarNode) and key_node.value == wanted:
+            return value_node
+    return None
+
+
+def _dashboard_secret_spans(node: MappingNode, yaml_text: str):
+    dashboard = _mapping_value(node, "dashboard")
+    if not isinstance(dashboard, MappingNode):
+        return set()
+
+    spans = set()
+
+    def _walk(mapping: MappingNode, depth: int = 0):
+        if depth > 20:
+            return
+        for key_node, value_node in mapping.value:
+            if not isinstance(key_node, ScalarNode):
+                continue
+            if isinstance(value_node, ScalarNode):
+                # Reuse the settings endpoint's exact secret predicate, including
+                # its empty-string and ${ENV_VAR} exclusions.
+                redacted = _redact_secret_tree({key_node.value: value_node.value})
+                if redacted.get(key_node.value) == DASHBOARD_SECRET_PLACEHOLDER:
+                    spans.add((value_node.start_mark.index, value_node.end_mark.index))
+            elif isinstance(value_node, MappingNode):
+                _walk(value_node, depth + 1)
+
+    for section in ("basic_auth", "oauth"):
+        section_node = _mapping_value(dashboard, section)
+        if isinstance(section_node, MappingNode):
+            _walk(section_node)
+    return spans
+
+
+def _redact_dashboard_secrets_in_yaml(yaml_text: str) -> str:
+    """Redact dashboard credentials without re-serializing the raw editor text."""
+    node = yaml.compose(yaml_text)
+    if not isinstance(node, MappingNode):
+        return yaml_text
+    for start, end in sorted(_dashboard_secret_spans(node, yaml_text), reverse=True):
+        yaml_text = yaml_text[:start] + DASHBOARD_SECRET_PLACEHOLDER + yaml_text[end:]
+    return yaml_text
+
+
 @router.get("/api/config/raw")
 async def get_config_raw(profile: Optional[str] = None):
     """Raw config.yaml text plus its resolved path.
@@ -44,7 +96,10 @@ async def get_config_raw(profile: Optional[str] = None):
             path = get_config_path()
         if not path.exists():
             return {"yaml": "", "path": str(path)}
-        return {"yaml": path.read_text(encoding="utf-8-sig"), "path": str(path)}
+        # carry #44b: dashboard login secrets must not leave the server through
+        # the raw-yaml view either.
+        yaml_text = path.read_text(encoding="utf-8-sig")
+        return {"yaml": _redact_dashboard_secrets_in_yaml(yaml_text), "path": str(path)}
 
     return await asyncio.to_thread(_run)
 
@@ -56,6 +111,7 @@ async def update_config_raw(body: RawConfigUpdate, profile: Optional[str] = None
         if not isinstance(parsed, dict):
             raise HTTPException(status_code=400, detail="YAML must be a mapping")
         with _profile_scope(body.profile or profile):
+            parsed = _restore_dashboard_secrets(parsed, read_raw_config())
             # Full-document replacement: the editor owns the whole file; never
             # merge omitted sections back from disk.
             # See #62723.
