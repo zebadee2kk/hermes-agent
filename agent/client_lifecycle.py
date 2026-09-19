@@ -95,6 +95,20 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
     # later request-client rebuilds drop them and User-Agent-sentinel providers (Kimi Coding) 403.
     fb_headers = getattr(fb_client, "_custom_headers", None) or getattr(fb_client, "default_headers", None)
     agent._client_kwargs = {"api_key": credential, "base_url": fb_base_url}
+    # Carry the fallback provider's per-provider TLS knobs (ssl_ca_cert / ssl_verify) into the kwargs:
+    # every later rebuild (the timeout apply just below, rotation, stream-retry) goes through
+    # _create_openai_client with these kwargs, and without them a private-CA endpoint fails
+    # CERTIFICATE_VERIFY_FAILED even though the initial fb_client (resolve_provider_client) was fine.
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.config_providers import apply_custom_provider_tls_to_client_kwargs
+        _cfg = load_config()
+        apply_custom_provider_tls_to_client_kwargs(
+            agent._client_kwargs, fb_base_url,
+            custom_providers=_cfg.get("custom_providers") if isinstance(_cfg, dict) else None,
+            config=_cfg if isinstance(_cfg, dict) else None)
+    except Exception as _tls_err:  # never let TLS lookup break failover itself
+        logger.debug("fallback TLS kwargs lookup failed for %s: %s", fb_base_url, _tls_err)
     if fb_headers:
         agent._client_kwargs["default_headers"] = dict(fb_headers)
     if timeout is not None:
