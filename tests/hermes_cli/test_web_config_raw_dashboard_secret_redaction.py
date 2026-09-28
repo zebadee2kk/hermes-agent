@@ -1,6 +1,6 @@
 """The raw config editor must not expose or overwrite dashboard credentials."""
 
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.web_routers.config_env import DASHBOARD_SECRET_PLACEHOLDER
 

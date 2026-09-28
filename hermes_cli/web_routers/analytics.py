@@ -10,7 +10,8 @@ from typing import Any, Dict, List, Optional
 
 import hermes_yaml as yaml
 from fastapi import APIRouter, HTTPException, Query
-from yaml.nodes import MappingNode, ScalarNode
+from ruamel.yaml import YAML
+from ruamel.yaml.nodes import MappingNode, ScalarNode
 
 from hermes_cli.config import get_config_path, read_raw_config
 from hermes_cli.web_deps import late
@@ -74,7 +75,9 @@ def _dashboard_secret_spans(node: MappingNode, yaml_text: str):
 
 def _redact_dashboard_secrets_in_yaml(yaml_text: str) -> str:
     """Redact dashboard credentials without re-serializing the raw editor text."""
-    node = yaml.compose(yaml_text)
+    composer = YAML(typ="safe", pure=True)
+    composer.version = (1, 1)
+    node = composer.compose(yaml_text)
     if not isinstance(node, MappingNode):
         return yaml_text
     for start, end in sorted(_dashboard_secret_spans(node, yaml_text), reverse=True):
