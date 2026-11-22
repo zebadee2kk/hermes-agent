@@ -18,6 +18,7 @@ from hermes_cli.web_deps import late
 from hermes_cli.web_routers._common import corrupt_store_as_status, http_failure
 from hermes_cli.web_routers.config_env import (
     DASHBOARD_SECRET_PLACEHOLDER,
+    _redact_dashboard_secrets,
     _redact_secret_tree,
     _restore_dashboard_secrets,
 )
@@ -85,6 +86,51 @@ def _dashboard_secret_spans(node: MappingNode, yaml_text: str):
     return spans
 
 
+def _constructed_secret_values(yaml_text: str) -> set:
+    """Secret values as the CONFIG sees them, i.e. after YAML merge keys (``<<: *anchor``) and aliases
+    are expanded. The key-name walk alone can be routed around by a merge at the root or dashboard
+    level, so every scalar holding one of these values is masked too (fail closed: an identical
+    string elsewhere in the file is masked as well)."""
+    loaded = yaml.safe_load(yaml_text)
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("dashboard"), dict):
+        return set()
+    values = set()
+
+    def _collect(orig, red, depth=0):
+        if depth > 20:
+            return
+        if isinstance(orig, dict) and isinstance(red, dict):
+            for k, v in orig.items():
+                if red.get(k) == DASHBOARD_SECRET_PLACEHOLDER and v != DASHBOARD_SECRET_PLACEHOLDER:
+                    values.add(str(v))
+                else:
+                    _collect(v, red.get(k), depth + 1)
+        elif isinstance(orig, list) and isinstance(red, list):
+            for o, r in zip(orig, red):
+                _collect(o, r, depth + 1)
+
+    _collect(loaded, _redact_dashboard_secrets(loaded))
+    return values
+
+
+def _scalar_spans_with_values(node, values: set) -> set:
+    spans, seen, stack = set(), set(), [node]
+    while stack:
+        n = stack.pop()
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        if isinstance(n, ScalarNode):
+            if n.value in values:
+                spans.add((n.start_mark.index, n.end_mark.index))
+        elif isinstance(n, MappingNode):
+            for k, v in n.value:
+                stack += [k, v]
+        elif isinstance(n, SequenceNode):
+            stack += list(n.value)
+    return spans
+
+
 def _redact_dashboard_secrets_in_yaml(yaml_text: str) -> str:
     """Redact dashboard credentials without re-serializing the raw editor text."""
     composer = YAML(typ="safe", pure=True)
@@ -92,7 +138,11 @@ def _redact_dashboard_secrets_in_yaml(yaml_text: str) -> str:
     node = composer.compose(yaml_text)
     if not isinstance(node, MappingNode):
         return yaml_text
-    for start, end in sorted(_dashboard_secret_spans(node, yaml_text), reverse=True):
+    spans = _dashboard_secret_spans(node, yaml_text)
+    secret_values = _constructed_secret_values(yaml_text)
+    if secret_values:
+        spans |= _scalar_spans_with_values(node, secret_values)
+    for start, end in sorted(spans, reverse=True):
         yaml_text = yaml_text[:start] + DASHBOARD_SECRET_PLACEHOLDER + yaml_text[end:]
     return yaml_text
 

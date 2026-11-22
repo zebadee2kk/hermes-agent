@@ -1,3 +1,4 @@
+import pytest
 """The raw config editor must not expose or overwrite dashboard credentials."""
 
 import hermes_yaml as yaml
@@ -93,3 +94,24 @@ def test_raw_yaml_redacts_secret_inside_list():
     text = "dashboard:\n  oauth:\n    clients:\n      - client_id: a\n        client_secret: list-secret-value-1\n"
     out = _redact_dashboard_secrets_in_yaml(text)
     assert "list-secret-value-1" not in out and "client_id: a" in out
+
+
+@pytest.mark.parametrize("text", [
+    # merge key at the dashboard level
+    "auth_defaults: &ad\n  basic_auth:\n    password: merged-secret-value-1\ndashboard:\n  <<: *ad\n  theme: x\n",
+    # merge key at the root level
+    "base: &b\n  dashboard:\n    basic_auth:\n      password: merged-secret-value-1\n<<: *b\nagent: {}\n",
+    # merge key inside the auth section
+    "pw: &p\n  password: merged-secret-value-1\ndashboard:\n  basic_auth:\n    <<: *p\n    username: u\n",
+    # scalar alias
+    "x: &s merged-secret-value-1\ndashboard:\n  basic_auth:\n    password: *s\n",
+    # whole-section alias
+    "c: &c\n  password: merged-secret-value-1\ndashboard:\n  basic_auth: *c\n",
+])
+def test_raw_yaml_redacts_secrets_reached_through_anchors_and_merges(text):
+    # Security-review follow-up: secrets are found from the CONSTRUCTED config, so YAML merge keys and
+    # aliases cannot route a dashboard credential around the key-name walk.
+    from hermes_cli.web_routers.analytics import _redact_dashboard_secrets_in_yaml
+    import hermes_yaml
+    assert "merged-secret-value-1" in str(hermes_yaml.safe_load(text).get("dashboard"))  # fixture sanity
+    assert "merged-secret-value-1" not in _redact_dashboard_secrets_in_yaml(text)
