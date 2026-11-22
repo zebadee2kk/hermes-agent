@@ -323,6 +323,17 @@ _CFG_ANCHORED_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# Whole-line ``KEY=value`` / ``export KEY=value`` in KNOWN env-dump / env-file output (``env_assign=True``
+# only). The value runs to its closing quote / inline `` #`` comment / end of line: _ENV_ASSIGN_RE's ``(\S+)``
+# stops at the first space, so a quoted multi-word value (``N8N_MCP_AUTHORIZATION="Bearer <token>"``) kept
+# its token visible (hermes-mgmt#737). Too greedy for prose or code, hence opt-in. Keys are gated by
+# _should_redact_assignment like every other assignment pass, so ``SSH_AUTH_SOCK=$HOME/...`` stays readable.
+_ENV_LINE_RE = re.compile(
+    rf"^([ \t]*{_LINE_NUMBER_GUTTER}(?:export[ \t]+)?)([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*([^\n]*)",
+    re.MULTILINE,
+)
+_INLINE_COMMENT_RE = re.compile(r"[ \t]+#")
+
 # YAML / colon config: bare-key quoted scalars cannot match _JSON_FIELD_RE.
 # Match escaped double quotes, doubled single quotes, or an unquoted token.
 # An unterminated quote masks to end-of-line; no branch crosses LF or CRLF.
@@ -358,7 +369,7 @@ _YAML_CFG_WORD_RE = re.compile(_YAML_CFG_NAMES, re.IGNORECASE)
 # almost never prose, the same rationale as _ENV_ASSIGN_RE.
 _KEY_KEYWORD_RE = re.compile(
     r"(?:api|auth|access|refresh|session|secret)[ _.\\-]?(?:key|token)"
-    r"|token|secret|passwd|password|pass|pw|credential|auth|key",
+    r"|token|secret|passwd|password|pass|pw|credential|authorization|auth|key",
     re.IGNORECASE,
 )
 
@@ -368,7 +379,7 @@ _KEY_KEYWORD_RE = re.compile(
 # are gated on value shape (_looks_like_opaque_credential).
 _STRONG_KEY_KEYWORD_RE = re.compile(
     r"(?:api|auth|access|refresh|session|id|bearer)[ _.\\-]?(?:key|token)"
-    r"|key[ _.\\-]?material|secret|passwd|password|pass|pw|credential|auth|bearer",
+    r"|key[ _.\\-]?material|secret|passwd|password|pass|pw|credential|authorization|auth|bearer",
     re.IGNORECASE,
 )
 # Password-class keys mask any literal value; for other keys a value that starts like ``$HOME/...``,
@@ -1439,6 +1450,31 @@ def _redact_credential_store_lines(text: str, *, mask_nonreusable: bool) -> str:
     return redact_credential_store_lines(text, mask, lambda k, v: _should_redact_assignment(k, v, check_keyword=True))
 
 
+def _redact_env_lines(text: str) -> str:
+    """Mask credential ``KEY=value`` lines to end of line (``***``); see _ENV_LINE_RE."""
+    def _sub(m):
+        raw = m.group(3)
+        # The value ends at its closing quote, or (unquoted) at an inline `` # comment``; the tail survives.
+        if raw[:1] in ("'", '"') and raw.find(raw[0], 1) > 0:
+            end = raw.find(raw[0], 1)
+            inner, tail = raw[1:end], raw[end + 1:]
+        else:
+            comment = _INLINE_COMMENT_RE.search(raw)
+            end = comment.start() if comment else len(raw.rstrip())
+            inner, tail = raw[:end].strip("'\""), raw[end:]
+        if not inner:
+            return m.group(0)
+        # ``export SSH_AUTH_SOCK=$(gpgconf --list-dirs ...)``: a var/path reference head keeps the
+        # existing rc-readability exemption even though the value has spaces.
+        head = inner.split(None, 1)[0]
+        if _PATH_OR_VAR_VALUE_RE.match(head) and not _should_redact_assignment(m.group(2), head, check_keyword=True):
+            return m.group(0)
+        if not _should_redact_assignment(m.group(2), inner, check_keyword=True):
+            return m.group(0)
+        return f"{m.group(1)}{m.group(2)}=***{tail}"
+    return _ENV_LINE_RE.sub(_sub, text)
+
+
 def _redact_url_credentials(text: str, code_file: bool, *, file_read: bool = False) -> str:
     """DB connection-string passwords, incoming-webhook secrets, bare-token and ``user:pass`` URL
     userinfo (``://`` text only)."""
@@ -1484,7 +1520,8 @@ def _redact_phone(m):
 
 def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = False,
                           file_read: bool = False, secret_file: bool = False,
-                          redact_url_credentials: bool = False, keep_phone_numbers: bool = False) -> str:
+                          redact_url_credentials: bool = False, keep_phone_numbers: bool = False,
+                          env_assign: bool = False) -> str:
     """Apply all redaction patterns to a block of text.
 
     Safe on any string. Enabled by default (``security.redact_secrets: false``
@@ -1533,18 +1570,24 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         return text
     return redact_credential_shapes(text, force=force, code_file=code_file, file_read=file_read,
                                     secret_file=secret_file, redact_url_credentials=redact_url_credentials,
-                                    keep_phone_numbers=keep_phone_numbers)
+                                    keep_phone_numbers=keep_phone_numbers, env_assign=env_assign)
 
 
 def redact_credential_shapes(text: str, *, force: bool = False, code_file: bool = False,
                              file_read: bool = False, secret_file: bool = False,
-                             redact_url_credentials: bool = False, keep_phone_numbers: bool = False) -> str:
+                             redact_url_credentials: bool = False, keep_phone_numbers: bool = False,
+                          env_assign: bool = False) -> str:
     """The pattern passes of ``redact_sensitive_text`` alone: no registered exact values, no preference
     gate. A classifier (does this value have a credential shape?) must not read a registry, or another
     profile's values would decide what this one treats as secret."""
     # ``secret_file`` is authoritative: a caller that classified the source as secret-bearing must not
     # be silently fail-open because another flag (code_file, or file_read implying it) was also set.
     code_file = (code_file or file_read) and not secret_file
+
+    # hermes-mgmt#737: KNOWN env dumps / env files mask credential values to end of line.
+    # AWS ``credential_process`` command lines keep the same exemption as the assignment passes below.
+    if env_assign and "=" in text:
+        text = outside_spans(text, aws_credential_process_keys(text) if secret_file else [], _redact_env_lines)
 
     # Key blocks first: a body line holding a token prefix (``gAAAA``) would otherwise be masked into
     # ``gAAAAh...Y2Nj`` and end the partial-key run there, leaving the lines past it visible.
@@ -1811,7 +1854,8 @@ def redact_terminal_output(output: str, command: str | None = None, *, force: bo
         return output
     secret_file = _command_reads_secret_file(command)
     code_file = not (secret_file or is_env_dump_command(command))
-    redacted = redact_sensitive_text(output, force=force, code_file=code_file, secret_file=secret_file)
+    redacted = redact_sensitive_text(output, force=force, code_file=code_file, secret_file=secret_file,
+                                     env_assign=not code_file)
     # Source-preserving output still gets the Python-repr pass on high-confidence
     # diagnostic lines (pytest ``E   `` introspection, final exception lines): that is
     # where {'BRAVE_API_KEY': '…'} leaks, not in source dumps.
