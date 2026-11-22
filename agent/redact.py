@@ -1584,14 +1584,14 @@ def redact_credential_shapes(text: str, *, force: bool = False, code_file: bool 
     # be silently fail-open because another flag (code_file, or file_read implying it) was also set.
     code_file = (code_file or file_read) and not secret_file
 
-    # hermes-mgmt#737: KNOWN env dumps / env files mask credential values to end of line.
-    # AWS ``credential_process`` command lines keep the same exemption as the assignment passes below.
-    if env_assign and "=" in text:
-        text = outside_spans(text, aws_credential_process_keys(text) if secret_file else [], _redact_env_lines)
-
     # Key blocks first: a body line holding a token prefix (``gAAAA``) would otherwise be masked into
     # ``gAAAAh...Y2Nj`` and end the partial-key run there, leaving the lines past it visible.
     text = _redact_private_key_blocks(text)
+    # hermes-mgmt#737: KNOWN env dumps / env files mask credential values to end of line. Runs AFTER the
+    # key-block pass: masking ``KEY="-----BEGIN ...`` first would hide the marker and leak the body.
+    # AWS ``credential_process`` command lines keep the same exemption as the assignment passes below.
+    if env_assign and "=" in text:
+        text = outside_spans(text, aws_credential_process_keys(text) if secret_file else [], _redact_env_lines)
     # Control/zero-width chars can split a token body so _PREFIX_RE alone misses it.
     if _has_known_prefix_substring(text):
         _prefix_sub = _mask_token_nonreusable if file_read else _mask_token

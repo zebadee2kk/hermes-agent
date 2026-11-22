@@ -38,3 +38,20 @@ class TestEnvDumpMultiWord737:
         text = 'DESCRIPTION_AUTH_NOTE="see the docs for more"'
         assert redact_terminal_output(text, "python app.py", force=True) == text
 
+
+
+_KEY_BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
+
+
+@pytest.mark.parametrize("command", ["env", "cat .env", "printenv"])
+@pytest.mark.parametrize("quote", ['"', "'", ""])
+@pytest.mark.parametrize("header", ["PRIVATE KEY", "RSA PRIVATE KEY", "OPENSSH PRIVATE KEY", "PGP PRIVATE KEY BLOCK"])
+def test_multiline_private_key_in_env_dump_is_masked_whole(command, quote, header):
+    # The env-line pass must not consume the BEGIN marker before the key-block pass runs,
+    # or the body lines below it would leak (security review of the #737 port).
+    from agent.redact import redact_terminal_output
+    text = (f"SSH_PRIVATE_KEY={quote}-----BEGIN {header}-----\n{_KEY_BODY}\n{_KEY_BODY[::-1]}\n"
+            f"-----END {header}-----{quote}\nPATH=/usr/bin\n")
+    out = redact_terminal_output(text, command, force=True)
+    assert _KEY_BODY not in out and _KEY_BODY[::-1] not in out
+    assert "PATH=/usr/bin" in out
