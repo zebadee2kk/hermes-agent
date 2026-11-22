@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 import hermes_yaml as yaml
 from fastapi import APIRouter, HTTPException, Query
 from ruamel.yaml import YAML
-from ruamel.yaml.nodes import MappingNode, ScalarNode
+from ruamel.yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 from hermes_cli.config import get_config_path, read_raw_config
 from hermes_cli.web_deps import late
@@ -66,8 +66,17 @@ def _dashboard_secret_spans(node: MappingNode, yaml_text: str):
                 redacted = _redact_secret_tree({key_node.value: value_node.value})
                 if redacted.get(key_node.value) == DASHBOARD_SECRET_PLACEHOLDER:
                     spans.add((value_node.start_mark.index, value_node.end_mark.index))
-            elif isinstance(value_node, MappingNode):
-                _walk(value_node, depth + 1)
+            else:
+                _walk_container(value_node, depth + 1)
+
+    def _walk_container(node, depth: int):
+        if depth > 20:
+            return
+        if isinstance(node, MappingNode):
+            _walk(node, depth)
+        elif isinstance(node, SequenceNode):
+            for item in node.value:
+                _walk_container(item, depth + 1)
 
     for section in ("basic_auth", "oauth"):
         section_node = _mapping_value(dashboard, section)

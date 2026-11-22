@@ -97,13 +97,24 @@ def _is_dashboard_secret_leaf(key: Any) -> bool:
     return _is_secret_config_key(key) or key.lower().endswith("_hash")
 
 
+def _is_redactable_secret_value(v: Any) -> bool:
+    # YAML ``password: 12345678`` loads as an int, so any non-empty scalar counts — except bools
+    # (a flag, not a credential) and ``${VAR}`` references, which name a secret rather than hold it.
+    if isinstance(v, str):
+        return bool(v) and not _ENV_PLACEHOLDER_RE.match(v)
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def _redact_secret_tree(node: Any, _depth: int = 0) -> Any:
-    if _depth > 20 or not isinstance(node, dict):
+    if _depth > 20:
+        return node
+    if isinstance(node, list):
+        return [_redact_secret_tree(item, _depth + 1) for item in node]
+    if not isinstance(node, dict):
         return node
     out = {}
     for k, v in node.items():
-        if (_is_dashboard_secret_leaf(k) and isinstance(v, str) and v
-                and not _ENV_PLACEHOLDER_RE.match(v)):
+        if _is_dashboard_secret_leaf(k) and _is_redactable_secret_value(v):
             out[k] = DASHBOARD_SECRET_PLACEHOLDER
         else:
             out[k] = _redact_secret_tree(v, _depth + 1)
@@ -133,8 +144,25 @@ def _restore_secret_tree(incoming: Dict[str, Any], existing: Any, _depth: int = 
                 out[k] = prior
         elif isinstance(v, dict) and _depth < 20:
             out[k] = _restore_secret_tree(v, prior, _depth + 1)
+        elif isinstance(v, list) and _depth < 20:
+            out[k] = _restore_secret_list(v, prior, _depth + 1)
         else:
             out[k] = v
+    return out
+
+
+def _restore_secret_list(incoming: list, existing: Any, _depth: int) -> list:
+    """Restore list items positionally against the stored list (redaction keeps positions)."""
+    prior = existing if isinstance(existing, list) else []
+    out = []
+    for i, item in enumerate(incoming):
+        before = prior[i] if i < len(prior) else None
+        if isinstance(item, dict):
+            out.append(_restore_secret_tree(item, before, _depth + 1))
+        elif isinstance(item, list) and _depth < 20:
+            out.append(_restore_secret_list(item, before, _depth + 1))
+        else:
+            out.append(item)
     return out
 
 

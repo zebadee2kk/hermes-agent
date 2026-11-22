@@ -86,3 +86,10 @@ def test_raw_put_new_secret_replaces_old_value():
     assert saved["dashboard"]["basic_auth"]["secret"] == "replacement-secret-value"
     assert saved["dashboard"]["basic_auth"]["password_hash"] == _HASH
     assert saved["dashboard"]["oauth"]["nested"]["client_secret"] == _OAUTH_SECRET
+
+
+def test_raw_yaml_redacts_secret_inside_list():
+    from hermes_cli.web_routers.analytics import _redact_dashboard_secrets_in_yaml
+    text = "dashboard:\n  oauth:\n    clients:\n      - client_id: a\n        client_secret: list-secret-value-1\n"
+    out = _redact_dashboard_secrets_in_yaml(text)
+    assert "list-secret-value-1" not in out and "client_id: a" in out

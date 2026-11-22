@@ -143,3 +143,29 @@ class TestConfigEndpoint:
         ba = read_raw_config()["dashboard"]["basic_auth"]
         assert ba["secret"] == "t" * 48
         assert ba["password_hash"] == _HASH
+
+
+class TestNonStringAndListSecrets:
+    """Security-review follow-up: YAML ``password: 12345678`` loads as an int, and
+    credential-bearing entries can sit inside a list."""
+
+    def test_numeric_secret_is_redacted_and_restored(self):
+        cfg = {"dashboard": {"basic_auth": {"password": 12345678, "session_ttl_seconds": 3600}}}
+        red = _redact_dashboard_secrets(cfg)
+        assert red["dashboard"]["basic_auth"]["password"] == DASHBOARD_SECRET_PLACEHOLDER
+        assert red["dashboard"]["basic_auth"]["session_ttl_seconds"] == 3600
+        assert _restore_dashboard_secrets(red, cfg)["dashboard"]["basic_auth"]["password"] == 12345678
+
+    def test_secret_inside_list_is_redacted_and_restored(self):
+        cfg = {"dashboard": {"oauth": {"clients": [{"client_id": "a", "client_secret": "list-secret-value-1"},
+                                                   {"client_id": "b", "client_secret": "list-secret-value-2"}]}}}
+        red = _redact_dashboard_secrets(cfg)
+        clients = red["dashboard"]["oauth"]["clients"]
+        assert [c["client_secret"] for c in clients] == [DASHBOARD_SECRET_PLACEHOLDER] * 2
+        assert [c["client_id"] for c in clients] == ["a", "b"]
+        restored = _restore_dashboard_secrets(red, cfg)
+        assert restored["dashboard"]["oauth"]["clients"] == cfg["dashboard"]["oauth"]["clients"]
+
+    def test_bools_and_none_stay_visible(self):
+        cfg = {"dashboard": {"basic_auth": {"password": None, "secret": False}}}
+        assert _redact_dashboard_secrets(cfg) == cfg
