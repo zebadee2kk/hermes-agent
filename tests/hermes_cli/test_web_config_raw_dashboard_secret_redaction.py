@@ -115,3 +115,12 @@ def test_raw_yaml_redacts_secrets_reached_through_anchors_and_merges(text):
     import hermes_yaml
     assert "merged-secret-value-1" in str(hermes_yaml.safe_load(text).get("dashboard"))  # fixture sanity
     assert "merged-secret-value-1" not in _redact_dashboard_secrets_in_yaml(text)
+
+
+@pytest.mark.parametrize("literal", ["0x1F2E3D4C", "1_234_567_890", "1.5e10", "0o17777777", "0b1011011101"])
+def test_raw_yaml_merged_secret_matches_by_constructed_value_not_text(literal):
+    # Security-review follow-up: YAML 1.1 non-canonical number spellings construct to a value whose
+    # str() differs from the source text; the merged-secret match must compare constructed values.
+    from hermes_cli.web_routers.analytics import _redact_dashboard_secrets_in_yaml
+    text = f"defaults: &d\n  basic_auth:\n    password: {literal}\ndashboard:\n  <<: *d\n"
+    assert literal not in _redact_dashboard_secrets_in_yaml(text)

@@ -86,15 +86,11 @@ def _dashboard_secret_spans(node: MappingNode, yaml_text: str):
     return spans
 
 
-def _constructed_secret_values(yaml_text: str) -> set:
-    """Secret values as the CONFIG sees them, i.e. after YAML merge keys (``<<: *anchor``) and aliases
-    are expanded. The key-name walk alone can be routed around by a merge at the root or dashboard
-    level, so every scalar holding one of these values is masked too (fail closed: an identical
-    string elsewhere in the file is masked as well)."""
-    loaded = yaml.safe_load(yaml_text)
+def _collect_secret_values(loaded) -> list:
+    """Dashboard secret values in a constructed config (merge keys / aliases already expanded)."""
     if not isinstance(loaded, dict) or not isinstance(loaded.get("dashboard"), dict):
-        return set()
-    values = set()
+        return []
+    values = []
 
     def _collect(orig, red, depth=0):
         if depth > 20:
@@ -102,7 +98,7 @@ def _constructed_secret_values(yaml_text: str) -> set:
         if isinstance(orig, dict) and isinstance(red, dict):
             for k, v in orig.items():
                 if red.get(k) == DASHBOARD_SECRET_PLACEHOLDER and v != DASHBOARD_SECRET_PLACEHOLDER:
-                    values.add(str(v))
+                    values.append(v)
                 else:
                     _collect(v, red.get(k), depth + 1)
         elif isinstance(orig, list) and isinstance(red, list):
@@ -113,7 +109,23 @@ def _constructed_secret_values(yaml_text: str) -> set:
     return values
 
 
-def _scalar_spans_with_values(node, values: set) -> set:
+def _merged_secret_spans(node, yaml_text: str, composer) -> set:
+    """Spans of every scalar that holds a dashboard secret of the CONSTRUCTED config.
+
+    The key-name walk can be routed around by a YAML merge key at the root or dashboard level
+    (``dashboard: {<<: *defaults}``). Secret values are taken from the config as both the app's loader
+    and this YAML 1.1 composer construct it, and each scalar node is compared by its own constructed
+    value (type + value) as well as its source text, so ``0x1F`` / ``1_000`` / ``1.5e10`` spellings
+    cannot slip past a ``str()`` comparison. Fail closed: an identical value elsewhere is masked too."""
+    secrets = _collect_secret_values(yaml.safe_load(yaml_text))
+    try:
+        secrets += _collect_secret_values(composer.constructor.construct_document(node))
+    except Exception:
+        pass
+    if not secrets:
+        return set()
+    typed = {(type(v), v) for v in secrets if isinstance(v, (str, int, float))}
+    texts = {str(v) for v in secrets}
     spans, seen, stack = set(), set(), [node]
     while stack:
         n = stack.pop()
@@ -121,7 +133,11 @@ def _scalar_spans_with_values(node, values: set) -> set:
             continue
         seen.add(id(n))
         if isinstance(n, ScalarNode):
-            if n.value in values:
+            try:
+                c = composer.constructor.construct_object(n, deep=True)
+            except Exception:
+                c = None
+            if n.value in texts or (isinstance(c, (str, int, float)) and (type(c), c) in typed):
                 spans.add((n.start_mark.index, n.end_mark.index))
         elif isinstance(n, MappingNode):
             for k, v in n.value:
@@ -138,10 +154,7 @@ def _redact_dashboard_secrets_in_yaml(yaml_text: str) -> str:
     node = composer.compose(yaml_text)
     if not isinstance(node, MappingNode):
         return yaml_text
-    spans = _dashboard_secret_spans(node, yaml_text)
-    secret_values = _constructed_secret_values(yaml_text)
-    if secret_values:
-        spans |= _scalar_spans_with_values(node, secret_values)
+    spans = _dashboard_secret_spans(node, yaml_text) | _merged_secret_spans(node, yaml_text, composer)
     for start, end in sorted(spans, reverse=True):
         yaml_text = yaml_text[:start] + DASHBOARD_SECRET_PLACEHOLDER + yaml_text[end:]
     return yaml_text
