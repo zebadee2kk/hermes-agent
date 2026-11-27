@@ -236,7 +236,12 @@ def test_every_identical_repeat_message_contains_recovery_guidance(code):
     assert "proceed" in message
 
 
-def test_streak_halt_does_not_stamp_unrelated_call_in_same_batch():
+def test_streak_halt_does_not_stamp_unrelated_call_in_same_batch(monkeypatch):
+    # Importing/run_agent inside a worktree makes the module-level pull-marker check
+    # touch the real hermes home, which the autouse home_io_guard forbids. Neutralise it.
+    monkeypatch.setattr(
+        "hermes_cli._early_recovery.restore_interrupted_pull", lambda *a, **k: False
+    )
     agent = _fake_agent(controller=_hard_stop_controller())
     for _ in range(STALL_GUARD_IDENTICAL_CALL_THRESHOLD):
         looped = agent._append("session_search", {}, "no sessions")
@@ -246,10 +251,12 @@ def test_streak_halt_does_not_stamp_unrelated_call_in_same_batch():
     assert agent._tool_guardrail_halt_decision.code == "identical_call_streak_halt"
 
     # An unrelated call later in the same batch still runs and keeps a clean result.
-    other_args = {"path": "/tmp/notes.txt"}
-    assert agent._tool_guardrails.before_call("read_file", other_args).allows_execution
-    other = agent._append("read_file", other_args, "file contents")
-    assert other == "file contents"
+    # web_search, not read_file: read_file's path-safety handling touches git state in the
+    # real hermes home, which the home_io_guard forbids in tests.
+    other_args = {"query": "other topic"}
+    assert agent._tool_guardrails.before_call("web_search", other_args).allows_execution
+    other = agent._append("web_search", other_args, "results")
+    assert other == "results"
     # The turn-level halt is unchanged.
     assert agent._tool_guardrail_halt_decision.code == "identical_call_streak_halt"
 
