@@ -15,10 +15,13 @@ Two guards, both notice/re-prompt-only:
 These assert behavior contracts, not message snapshots.
 """
 
+import pytest
+
 from agent.agent_runtime_helpers import trailing_continue_intent
 from agent.tool_guardrails import (
     IDENTICAL_RESULT_STUB_MIN_CHARS,
     STALL_GUARD_IDENTICAL_CALL_THRESHOLD,
+    ToolCallGuardrailConfig,
     ToolCallGuardrailController,
 )
 
@@ -119,13 +122,13 @@ def test_never_blocks_execution():
 # ── result-append integration (AIAgent._append_guardrail_observation) ─────
 
 
-def _fake_agent(stall_guards=True):
+def _fake_agent(stall_guards=True, controller=None):
     from types import SimpleNamespace
 
     from run_agent import AIAgent
 
     agent = SimpleNamespace(
-        _tool_guardrails=ToolCallGuardrailController(),
+        _tool_guardrails=controller or ToolCallGuardrailController(),
         _stall_guards=stall_guards,
         _tool_guardrail_halt_decision=None,
     )
@@ -173,6 +176,82 @@ def test_notice_streak_keys_on_raw_result_not_annotated_result():
     args = {"path": "/tmp/x"}
     outs = [agent._append("read_file", args, "contents") for _ in range(3)]
     assert "hermes note" in outs[2]
+
+
+# ── recovery guidance + per-call halt scoping (incident 2026-11-27) ──────
+# A model emitted session_search with EMPTY args three times in a row; the
+# warning and halt must tell it how to recover, and the halt must stay on the
+# repeated call instead of stamping unrelated calls in the same batch.
+
+
+def _hard_stop_controller():
+    return ToolCallGuardrailController(
+        ToolCallGuardrailConfig(hard_stop_enabled=True, no_progress_warn_after=2, no_progress_block_after=3)
+    )
+
+
+def _assert_recovery_guidance(message):
+    assert "identical" in message
+    assert "Do NOT repeat" in message
+    assert "change the arguments" in message
+    assert "different tool" in message
+    assert "proceed" in message
+
+
+def test_no_progress_warning_contains_recovery_guidance():
+    c = _hard_stop_controller()
+    c.after_call("session_search", {}, "no sessions", failed=False)
+    warn = c.after_call("session_search", {}, "no sessions", failed=False)
+    assert warn.code == "idempotent_no_progress_warning"
+    _assert_recovery_guidance(warn.message)
+
+
+def test_identical_call_streak_halt_contains_recovery_guidance():
+    c = _hard_stop_controller()
+    for _ in range(STALL_GUARD_IDENTICAL_CALL_THRESHOLD):
+        c.observe_call("session_search", {}, "no sessions")
+    halt = c.halt_decision
+    assert halt is not None and halt.code == "identical_call_streak_halt"
+    _assert_recovery_guidance(halt.message)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "repeated_exact_failure_warning",
+        "repeated_exact_failure_block",
+        "idempotent_no_progress_warning",
+        "idempotent_no_progress_block",
+        "identical_call_streak_halt",
+        "identical_cycle_halt",
+    ],
+)
+def test_every_identical_repeat_message_contains_recovery_guidance(code):
+    from agent.tool_guardrails import _DECISION_MESSAGES
+
+    message = _DECISION_MESSAGES[code].format(tool_name="session_search", count=3, period=2)
+    assert "Do NOT repeat" in message
+    assert "change the arguments" in message
+    assert "different tool" in message
+    assert "proceed" in message
+
+
+def test_streak_halt_does_not_stamp_unrelated_call_in_same_batch():
+    agent = _fake_agent(controller=_hard_stop_controller())
+    for _ in range(STALL_GUARD_IDENTICAL_CALL_THRESHOLD):
+        looped = agent._append("session_search", {}, "no sessions")
+    assert "Tool loop hard stop: identical_call_streak_halt" in looped
+    _assert_recovery_guidance(looped)
+    assert agent._tool_guardrail_halt_decision is not None
+    assert agent._tool_guardrail_halt_decision.code == "identical_call_streak_halt"
+
+    # An unrelated call later in the same batch still runs and keeps a clean result.
+    other_args = {"path": "/tmp/notes.txt"}
+    assert agent._tool_guardrails.before_call("read_file", other_args).allows_execution
+    other = agent._append("read_file", other_args, "file contents")
+    assert other == "file contents"
+    # The turn-level halt is unchanged.
+    assert agent._tool_guardrail_halt_decision.code == "identical_call_streak_halt"
 
 
 # ── result-reference stubbing (byte-identical duplicate results) ──────────

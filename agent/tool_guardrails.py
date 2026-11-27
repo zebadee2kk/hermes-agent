@@ -237,36 +237,50 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
 
 
 # Guardrail verdict text injected into the conversation, keyed by decision code.
+# Recovery guidance for byte-identical repeats: name the concrete next moves so a model that hit
+# the warning/halt changes course instead of giving up (incident 2026-11-27: empty-args session_search x3).
+# Avoid the word "byte-identical": it marks result-reference stubs, which tests and readers key on.
+_IDENTICAL_CALL_RECOVERY = (
+    "Your last calls were identical. Do NOT repeat the same call: change the arguments "
+    "(e.g. supply a missing query), call a different tool, or skip it and proceed."
+)
+_IDENTICAL_FAILURE_RECOVERY = (
+    "Do NOT repeat the identical call: read the error, then change the arguments, call a "
+    "different tool, or proceed without it and explain the blocker."
+)
+_IDENTICAL_CYCLE_RECOVERY = (
+    "Your last batches were identical. Do NOT repeat the same calls: change the arguments, "
+    "call a different tool, or proceed with the results already provided."
+)
+
 # ``same_tool_failure_warning`` is built by _tool_failure_recovery_hint (tool-specific).
 _DECISION_MESSAGES: dict[str, str] = {
     "repeated_exact_failure_block": (
         "Blocked {tool_name}: the same tool call failed {count} times with identical arguments. "
-        "Stop retrying it unchanged; change strategy or explain the blocker."
+        + _IDENTICAL_FAILURE_RECOVERY
     ),
     "idempotent_no_progress_block": (
         "Blocked {tool_name}: this read-only call returned the same result {count} times. "
-        "Stop repeating it unchanged; use the result already provided or try a different query."
+        + _IDENTICAL_CALL_RECOVERY
     ),
     "same_tool_failure_halt": (
         "Stopped {tool_name}: it failed {count} times this turn. "
         "Stop retrying the same failing tool path and choose a different approach."
     ),
     "repeated_exact_failure_warning": (
-        "{tool_name} has failed {count} times with identical arguments. This looks like a loop; "
-        "inspect the error and change strategy instead of retrying it unchanged."
+        "{tool_name} has failed {count} times with identical arguments. This looks like a loop. "
+        + _IDENTICAL_FAILURE_RECOVERY
     ),
     "idempotent_no_progress_warning": (
-        "{tool_name} returned the same result {count} times. Use the result already provided "
-        "or change the query instead of repeating it unchanged."
+        "{tool_name} returned the same result {count} times. " + _IDENTICAL_CALL_RECOVERY
     ),
     "identical_call_streak_halt": (
         "Stopped {tool_name}: the same call with identical arguments returned the same result "
-        "{count} times in a row. Stop repeating it unchanged; use the result already provided or change strategy."
+        "{count} times in a row. " + _IDENTICAL_CALL_RECOVERY
     ),
     "identical_cycle_halt": (
         "Stopped {tool_name}: the same repeating cycle of tool calls (period {period}) with identical "
-        "arguments and identical results has run {count} times. Repeating the batch unchanged is not "
-        "progress; use the results already provided or change strategy."
+        "arguments and identical results has run {count} times. " + _IDENTICAL_CYCLE_RECOVERY
     ),
     "loop_web_search_cap": (
         "Blocked web_search: this turn has already made {cap} web searches, the per-turn limit. "
