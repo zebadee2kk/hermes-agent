@@ -26,6 +26,21 @@ from agent.tool_guardrails import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_import_time_pull_recovery(monkeypatch):
+    """Neutralise the interrupted-``hermes update`` check that importing run_agent runs.
+
+    The first ``import run_agent`` in a process triggers ``restore_interrupted_pull``
+    (via hermes_bootstrap and run_agent itself), which stats the checkout's git pull
+    marker. In a git worktree of ~/.hermes/hermes-agent that marker lives in the REAL
+    hermes home's gitdir, which the autouse home_io_guard forbids, so whichever test
+    imports run_agent first would fail. Not under test here; stub it for every test.
+    """
+    monkeypatch.setattr(
+        "hermes_cli._early_recovery.restore_interrupted_pull", lambda *a, **k: False
+    )
+
+
 def _observe_n(controller, n, tool="web_search", args=None, result="same result"):
     notices = []
     for _ in range(n):
@@ -236,12 +251,7 @@ def test_every_identical_repeat_message_contains_recovery_guidance(code):
     assert "proceed" in message
 
 
-def test_streak_halt_does_not_stamp_unrelated_call_in_same_batch(monkeypatch):
-    # Importing/run_agent inside a worktree makes the module-level pull-marker check
-    # touch the real hermes home, which the autouse home_io_guard forbids. Neutralise it.
-    monkeypatch.setattr(
-        "hermes_cli._early_recovery.restore_interrupted_pull", lambda *a, **k: False
-    )
+def test_streak_halt_does_not_stamp_unrelated_call_in_same_batch():
     agent = _fake_agent(controller=_hard_stop_controller())
     for _ in range(STALL_GUARD_IDENTICAL_CALL_THRESHOLD):
         looped = agent._append("session_search", {}, "no sessions")
