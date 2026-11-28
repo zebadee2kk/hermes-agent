@@ -13,6 +13,7 @@ import contextlib
 import json
 from pathlib import Path
 import logging
+import traceback
 import os
 import random
 import threading
@@ -385,7 +386,8 @@ def _canonical_tool_name(function_name: str) -> str:
 
 
 def _unwrap_tool_search_call(
-    agent, function_name: str, function_args: dict, *, flatten_probe: bool = False
+    agent, function_name: str, function_args: dict, *, flatten_probe: bool = False,
+    call_id: Optional[str] = None,
 ) -> tuple[str, dict, Optional[str]]:
     """Peel the ``tool_call`` bridge so downstream hooks (checkpointing, guardrails, plugin
     hooks, activity feed) see the underlying tool; ``tool_call.function`` stays untouched for
@@ -396,8 +398,14 @@ def _unwrap_tool_search_call(
     message when the underlying tool is out of scope or its args fail the deferred-schema
     probe (``flatten_probe`` collapses the probe's JSON payload to one plain string for
     callers that wrap the message in ``{"error": ...}``).
+
+    An unexpected failure falls back to the wrapper (dispatch still runs through the bridge)
+    but is logged with names, the call id, the exception type and stack frames only — never
+    argument values or the exception message, which may carry secrets. ``call_id`` is for
+    that diagnostic.
     """
     scope_block: Optional[str] = None
+    underlying: Optional[str] = None
     try:
         from tools import tool_search as _ts
         if function_name != _ts.TOOL_CALL_NAME:
@@ -425,8 +433,13 @@ def _unwrap_tool_search_call(
                 f"{json.dumps(probe.get('parameters', {}), ensure_ascii=False)}. "
                 f"{probe.get('hint', '')}"
             ).strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        # Exception type + stack frames only: ``str(exc)`` (and so ``exc_info``) can echo
+        # argument values, e.g. a validator quoting the offending input.
+        logger.warning(
+            "deferred_unwrap_error: %s unwrap failed (call_id=%s, inner_tool=%s, error=%s); "
+            "falling back to the wrapper\n%s", function_name, call_id or "?", underlying or "?",
+            type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__)).rstrip())
     return function_name, function_args, scope_block
 
 
@@ -450,7 +463,8 @@ def _parse_tool_call(agent, tool_call, *, flatten_probe: bool = False) -> _Parse
     args, parse_error = _parse_tool_arguments(tool_call.function.arguments)
     scope_block = None
     if parse_error is None:
-        name, args, scope_block = _unwrap_tool_search_call(agent, name, args, flatten_probe=flatten_probe)
+        name, args, scope_block = _unwrap_tool_search_call(
+            agent, name, args, flatten_probe=flatten_probe, call_id=_pairing_tool_call_id(tool_call))
     return _ParsedCall(tool_call, name, args, [], parse_error, scope_block)
 
 
