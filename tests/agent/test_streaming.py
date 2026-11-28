@@ -3,6 +3,7 @@
 Tests the unified streaming API call, delta callbacks, tool-call
 suppression, provider fallback, and CLI streaming display.
 """
+import json
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -143,7 +144,7 @@ class TestStreamingAccumulator:
     def test_sparse_tool_delta_allows_missing_nested_fields(
         self, mock_close, mock_create
     ):
-        """A partial tool delta may contain arguments before its other fields."""
+        """Arguments without a tool-call header are retained but classified for retry."""
         from run_agent import AIAgent
 
         sparse_tool_delta = SimpleNamespace(
@@ -182,7 +183,7 @@ class TestStreamingAccumulator:
         tool_call = response.choices[0].message.tool_calls[0]
         assert tool_call.function.name == ""
         assert tool_call.function.arguments == '{"city":"Paris"}'
-        assert response.choices[0].finish_reason == "tool_calls"
+        assert response.choices[0].finish_reason == "length"
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
@@ -344,6 +345,58 @@ class TestStreamingAccumulator:
         assert tc[0].id == "call_123"
         assert tc[0].function.name == "terminal"
         assert tc[0].function.arguments == '{"command": "ls"}'
+
+    @pytest.mark.parametrize(
+        ("preceding_content", "header_content"),
+        [
+            pytest.param(None, "\n\n", id="whitespace-on-header"),
+            pytest.param(None, None, id="no-content"),
+            pytest.param("\n\n", None, id="content-precedes-header"),
+            pytest.param(None, "Running tests", id="ordinary-text-on-header"),
+        ],
+    )
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_tool_call_header_survives_content_chunk(
+        self, mock_close, mock_create, preceding_content, header_content
+    ):
+        """Content and the first tool delta may share a provider chunk."""
+        chunks = []
+        if preceding_content is not None:
+            chunks.append(_make_stream_chunk(content=preceding_content))
+        chunks.extend([
+            _make_stream_chunk(
+                content=header_content,
+                tool_calls=[_make_tool_call_delta(
+                    index=0,
+                    tc_id="call_mixed",
+                    name="terminal",
+                    arguments='{"command": "cd ~/Projects/Worktr',
+                )],
+            ),
+            _make_stream_chunk(tool_calls=[_make_tool_call_delta(
+                index=0, arguments='ees/hermes-agent && ls", "timeout": 30}'
+            )]),
+            _make_stream_chunk(finish_reason="tool_calls"),
+        ])
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+        from run_agent import AIAgent
+        agent = AIAgent(
+            api_key="test-key", base_url="https://openrouter.ai/api/v1", model="test/model",
+            quiet_mode=True, skip_context_files=True, skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        tool_call = response.choices[0].message.tool_calls[0]
+        assert tool_call.function.name == "terminal"
+        arguments = json.loads(tool_call.function.arguments)
+        assert arguments["command"].startswith("cd ~/Projects/Worktrees/")
 
 
     @patch("run_agent.AIAgent._create_request_openai_client")

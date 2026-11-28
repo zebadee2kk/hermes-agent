@@ -451,7 +451,7 @@ def _run_git(
     normalized_working_dir = _normalize_path(working_dir)
     if not normalized_working_dir.exists():
         msg = f"working directory not found: {normalized_working_dir}"
-        logger.error("Git command skipped: %s (%s)", " ".join(["git"] + list(args)), msg)
+        logger.debug("Git command skipped: %s (%s)", " ".join(["git"] + list(args)), msg)
         return False, "", msg
     if not normalized_working_dir.is_dir():
         msg = f"working directory is not a directory: {normalized_working_dir}"
@@ -489,8 +489,8 @@ def _run_git(
         stderr = result.stderr.decode("utf-8", errors="replace").strip() if "-z" in args else result.stderr.strip()
         if not ok and result.returncode not in allowed_returncodes:
             logger.error(
-                "Git command failed: %s (rc=%d) stderr=%s",
-                " ".join(cmd), result.returncode, stderr,
+                "Git command failed: %s (cwd=%s rc=%d) stderr=%s",
+                " ".join(cmd), normalized_working_dir, result.returncode, stderr,
             )
         return ok, stdout, stderr
     except subprocess.TimeoutExpired:
@@ -857,9 +857,10 @@ def _dir_file_count(path: str) -> int:
 
 
 def _too_broad(abs_dir: str) -> bool:
-    """``/``, the user's home and every ancestor of it: never a project, always huge."""
+    """Reject filesystem, home, and shared temporary roots as project roots."""
     home = Path.home().resolve()
-    return Path(abs_dir) in {Path("/"), home, *home.parents}
+    temp_roots = {Path(root).resolve() for root in ("/tmp", "/var/tmp", "/dev/shm", tempfile.gettempdir())}
+    return Path(abs_dir) in {Path("/"), home, *home.parents, *temp_roots}
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -1048,6 +1049,10 @@ class CheckpointManager:
             return False
 
         abs_dir = str(_normalize_path(working_dir))
+
+        if not Path(abs_dir).is_dir():
+            logger.debug("Checkpoint skipped: working directory does not exist yet (%s)", abs_dir)
+            return False
 
         # Skip root, home, and other overly broad directories
         if _too_broad(abs_dir):
@@ -1523,6 +1528,9 @@ class CheckpointManager:
             candidate = path
         else:
             candidate = path.parent
+
+        while not candidate.exists() and candidate != candidate.parent:
+            candidate = candidate.parent
 
         # An explicitly checkpointed root owns its ledger even when an
         # ancestor carries a project marker. Prefer the nearest owner.

@@ -956,11 +956,14 @@ def restore_interrupted_pull(project_root: Path | None = None, *, after_failure:
     """
     try:
         root = _project_root() if project_root is None else project_root
+        # Ownership first: the marker existence probe is itself file I/O
+        # against the real hermes home and trips tests/home_io_guard.py when
+        # pytest runs from a checkout it owns (including its worktrees).
+        if _pytest_owns_live_checkout(root):
+            return False
         marker = interrupted_pull_marker(root)
         if not marker.is_file() and not (Path(root) / ZIP_SWAP_JOURNAL).is_file():
             return False  # fast path: nothing to repair, no lock taken
-        if _pytest_owns_live_checkout(root):
-            return False
         # A live `hermes update` (or its build/completion/git, after its updater died) owns the
         # checkout: its own transaction settles the tree, and repairing under it races its git.
         busy_note = "⚠ Not repairing the checkout now: {}. Launch again once it finishes."
@@ -1354,8 +1357,20 @@ def _pytest_owns_live_checkout(root: Path) -> bool:
     """Keep lifecycle tests from repairing the checkout that runs the suite.
 
     Copied installations in tmp_path remain eligible for real recovery tests.
+    A git worktree of the live checkout is also owned: its gitdir lives under
+    the live checkout's ``.git/worktrees/``, and recovery touching that marker
+    trips tests/home_io_guard.py against the real hermes home.
     """
-    return "PYTEST_CURRENT_TEST" in os.environ and root == Path(__file__).resolve().parent.parent
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        return False
+    this_checkout = Path(__file__).resolve().parent.parent
+    if root == this_checkout:
+        return True
+    git_dir = _git_dir(root)
+    try:
+        return git_dir.is_relative_to(this_checkout / ".git" / "worktrees")
+    except (OSError, ValueError):
+        return False
 
 
 def _missing_environment(root: Path) -> bool:

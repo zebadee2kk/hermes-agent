@@ -13,6 +13,14 @@ import pytest
 SHIM = "Connect timeout, please try again later."
 
 
+def test_router_timeout_prefix_requires_non_whitespace_text():
+    from agent.transports.chat_completions import router_timeout_shim_may_follow
+
+    assert router_timeout_shim_may_follow("   ") is False
+    assert router_timeout_shim_may_follow("\n\n") is False
+    assert router_timeout_shim_may_follow("Connect timeout, ") is True
+
+
 def _chunk(content=None, finish_reason=None, usage=None):
     delta = SimpleNamespace(content=content, tool_calls=None, reasoning_content=None, reasoning=None)
     return SimpleNamespace(choices=[SimpleNamespace(index=0, delta=delta, finish_reason=finish_reason)],
