@@ -156,3 +156,74 @@ def test_expansion_preserves_connector_batches_and_rejects_bad_envelopes():
         bedrock = provider_data["bedrock_content_blocks"][index]["toolUse"]
         assert anthropic["id"] == bedrock["toolUseId"] == child.id
         assert anthropic["input"] == bedrock["input"] == json.loads(child.function.arguments)
+
+
+# Nested ``arguments`` normalization: an explicit empty object is a legitimate parameterless call,
+# but a missing/null payload must fail loudly instead of silently becoming one.
+
+@pytest.mark.parametrize("args", [
+    {"calls": [{"name": "todo_list"}]},
+    {"calls": [{"name": "todo_list", "arguments": None}]},
+    {"name": "todo_list"},
+    {"name": "todo_list", "arguments": None},
+])
+def test_nested_arguments_missing_or_null_is_a_shape_error(args):
+    from tools.tool_search_validation import normalize_tool_call_entries
+
+    entries, error = normalize_tool_call_entries(args)
+    assert entries == []
+    assert "calls[0]" in error and "'todo_list'" in error
+    assert ("missing" if "arguments" not in (args.get("calls") or [args])[0] else "null") in error
+    assert "NOT invoked" in error and "provider emission or response parsing" in error
+    assert '"arguments": {}' in error
+
+
+@pytest.mark.parametrize("args", [
+    {"calls": [{"name": "todo_list", "arguments": {}}]},
+    {"name": "todo_list", "arguments": {}},
+    {"calls": [{"name": "todo_list", "arguments": "{}"}]},
+])
+def test_nested_explicit_empty_arguments_stay_valid(args):
+    from tools.tool_search_validation import normalize_tool_call_entries
+
+    assert normalize_tool_call_entries(args) == ([{"name": "todo_list", "arguments": {}}], None)
+
+
+@pytest.mark.parametrize("blank", ["", "   \n"])
+def test_nested_blank_string_arguments_kept_for_gateways_and_logged(blank, caplog):
+    import logging
+    from tools.tool_search_validation import normalize_tool_call_entries
+
+    with caplog.at_level(logging.INFO, logger="tools.tool_search"):
+        result = normalize_tool_call_entries({"calls": [{"name": "todo_list", "arguments": blank}]})
+    assert result == ([{"name": "todo_list", "arguments": {}}], None)
+    assert any("calls[0] (todo_list)" in r.getMessage() and "blank" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize("bad", [[], ["x"], 5, True])
+def test_nested_non_object_arguments_rejected(bad):
+    from tools.tool_search_validation import normalize_tool_call_entries
+
+    entries, error = normalize_tool_call_entries({"calls": [{"name": "todo_list", "arguments": bad}]})
+    assert entries == [] and "must be an object" in error
+
+
+def test_nested_null_arguments_in_later_entry_names_its_position():
+    from tools.tool_search_validation import normalize_tool_call_entries
+
+    entries, error = normalize_tool_call_entries({"calls": [
+        {"name": "connectors__drive__list", "arguments": {}},
+        {"name": "connectors__drive__get", "arguments": None},
+    ]})
+    assert entries == [] and "calls[1]" in error and "connectors__drive__get" in error
+
+
+def test_expansion_leaves_batch_with_lost_arguments_intact_for_dispatcher_error():
+    from agent.tool_call_batches import expand_local_tool_batches
+
+    call = _call([{"name": "mcp__fixture__read", "arguments": {"path": "a"}},
+                  {"name": "mcp__fixture__read"}])
+    original = call.function.arguments
+    assert expand_local_tool_batches([call]) == [call]
+    assert call.function.arguments == original

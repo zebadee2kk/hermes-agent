@@ -138,21 +138,35 @@ def validate_deferred_call_args(name: str, args: dict[str, Any]) -> Optional[str
         return None
 
 
+def _absent_arguments_error(position: int, name: str, *, missing: bool) -> str:
+    """Shape error for a nested entry whose ``arguments`` is missing or ``null``. Names the
+    likely provenance so an incident is diagnosable from the transcript alone; never carries
+    argument values."""
+    state = "is missing" if missing else "is null"
+    return (f"tool_call calls[{position}] ('{name}'): 'arguments' {state}. The payload was absent "
+            "when Hermes received this call (lost in provider emission or response parsing, "
+            "before dispatch). The tool was NOT invoked. Resend with the full arguments object, "
+            'or "arguments": {} if the tool takes no parameters.')
+
+
 def normalize_tool_call_entries(args: dict[str, Any]) -> tuple[list[dict[str, Any]], Optional[str]]:
     """Normalize ``tool_call`` arguments into a ``calls[]`` list of entries.
 
     Accepts the advertised batch shape ``{"calls": [{"name", "arguments"}, ...]}``
     and, tolerantly, the legacy single shape ``{"name": ..., "arguments": ...}``
     (a single call is a batch of one). Each entry's ``arguments`` is coerced to
-    a dict (JSON strings parsed, ``None`` → ``{}``). Returns ``(entries, None)``
-    or ``([], error_message)``.
+    a dict (JSON strings parsed, a blank string → ``{}``). A missing or ``null``
+    ``arguments`` is a shape error, not a parameterless call: the schema requires
+    the object, and silently substituting ``{}`` hid payloads lost upstream.
+    Returns ``(entries, None)`` or ``([], error_message)``.
     """
     raw_calls = args.get("calls")
     if raw_calls is None:
         # Legacy single shape.
         if not str(args.get("name") or "").strip():
             return [], "tool_call requires 'calls' (an array of {name, arguments})"
-        raw_calls = [{"name": args.get("name"), "arguments": args.get("arguments")}]
+        # Copy ``arguments`` only when present so a missing key stays distinguishable.
+        raw_calls = [{key: args[key] for key in ("name", "arguments") if key in args}]
     if isinstance(raw_calls, str):
         # Tolerate the model emitting the batch envelope as a JSON string —
         # mirror the per-entry `arguments` handling below (#114484).
@@ -175,11 +189,16 @@ def normalize_tool_call_entries(args: dict[str, Any]) -> tuple[list[dict[str, An
         if name in BRIDGE_TOOL_NAMES:
             return [], f"tool_call cannot invoke '{name}' (it is itself a bridge tool)"
         raw_args = raw.get("arguments")
-        if raw_args is None or (isinstance(raw_args, str) and not raw_args.strip()):
+        if raw_args is None:
+            return [], _absent_arguments_error(position, name, missing="arguments" not in raw)
+        if isinstance(raw_args, str) and not raw_args.strip():
             # "" / whitespace is how some OpenAI-compatible gateways spell "no arguments" for a
             # parameterless tool (#83937); the loop already treats an empty outer arguments string
             # as {} (turn_tool_validation), and a missing required param still surfaces below via
-            # validate_deferred_call_args instead of an opaque JSON parse error.
+            # validate_deferred_call_args instead of an opaque JSON parse error. Logged (name and
+            # position only) so a blank-string payload loss stays visible.
+            logger.info("tool_call calls[%d] (%s): blank 'arguments' string treated as {}",
+                        position, name)
             raw_args = {}
         if isinstance(raw_args, str):
             try:

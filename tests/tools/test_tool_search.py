@@ -429,7 +429,7 @@ class TestBridgeDispatch:
         })
         assert err is not None
 
-    @pytest.mark.parametrize("raw_args", ["", "  \n", None])
+    @pytest.mark.parametrize("raw_args", ["", "  \n"])
     def test_resolve_underlying_call_treats_blank_arguments_as_no_arguments(self, raw_args):
         """An OpenAI-compatible gateway emitting ``arguments: ""`` for a parameterless deferred tool
         must execute with {} instead of looping on a JSON parse error (#83937); malformed
@@ -439,6 +439,15 @@ class TestBridgeDispatch:
         assert (name, args, err) == ("todo_list", {}, None)
         _, _, err = resolve_underlying_call({"calls": [{"name": "todo_list", "arguments": '{"todos": ['}]})
         assert err
+
+    @pytest.mark.parametrize("entry", [{"name": "todo_list", "arguments": None}, {"name": "todo_list"}])
+    def test_resolve_underlying_call_rejects_missing_or_null_arguments(self, entry):
+        """A missing/null nested payload is a lost payload, not a parameterless call: the
+        advertised schema requires the object, and substituting {} hid upstream loss."""
+        from tools.tool_search import resolve_underlying_call
+        name, args, err = resolve_underlying_call({"calls": [entry]})
+        assert (name, args) == (None, {})
+        assert "NOT invoked" in err
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +784,30 @@ class TestDeferredCallSchemaProbe:
         ))
         assert result.get("ok") is True
         assert result.get("doc") == "abc"
+
+    @pytest.mark.parametrize("entry_args", [{"arguments": None}, {}])
+    def test_lost_nested_arguments_never_dispatch_parameterless(self, entry_args):
+        import model_tools
+
+        calls = []
+        name, toolset = "mcp_probe_parameterless_op", "mcp-probe-parameterless"
+        self._register_schema(name, toolset, {"type": "object", "properties": {
+            "query": {"type": "string"}}}, calls)
+
+        result = json.loads(model_tools.handle_function_call(
+            function_name="tool_call",
+            function_args={"calls": [{"name": name, **entry_args}]},
+            enabled_toolsets=[toolset],
+        ))
+        assert calls == []
+        assert "NOT invoked" in result["error"]
+
+        result = json.loads(model_tools.handle_function_call(
+            function_name="tool_call",
+            function_args={"calls": [{"name": name, "arguments": {}}]},
+            enabled_toolsets=[toolset],
+        ))
+        assert result.get("ok") is True and calls == [{}]
 
     def test_invalid_enum_is_blocked_before_dispatch(self):
         import model_tools
