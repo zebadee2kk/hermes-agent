@@ -189,6 +189,15 @@ def test_nested_explicit_empty_arguments_stay_valid(args):
     assert normalize_tool_call_entries(args) == ([{"name": "todo_list", "arguments": {}}], None)
 
 
+def test_nested_string_encoded_arguments_are_parsed_and_preserved():
+    from tools.tool_search_validation import normalize_tool_call_entries
+
+    entries, error = normalize_tool_call_entries(
+        {"calls": [{"name": "todo_list", "arguments": '{"filter": "all"}'}]})
+    assert error is None
+    assert entries == [{"name": "todo_list", "arguments": {"filter": "all"}}]
+
+
 @pytest.mark.parametrize("blank", ["", "   \n"])
 def test_nested_blank_string_arguments_kept_for_gateways_and_logged(blank, caplog):
     import logging
