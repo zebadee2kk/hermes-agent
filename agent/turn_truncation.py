@@ -417,6 +417,10 @@ def _retry_truncated_tool_call(st: _Trunc, api_kwargs: Any) -> TruncationVerdict
             agent._buffer_vprint(f"⚠️  Stream interrupted mid tool-call — retrying ({n}/4)...")
         else:
             agent._buffer_vprint(f"⚠️  Truncated tool call detected — retrying API call ({n}/4)...")
+        logger.warning(
+            "truncated_tool_call_retry: n=%d stub=%s",
+            n, st.is_stub,
+        )
         agent._ephemeral_max_output_tokens = boosted_output_cap(
             agent, agent._requested_output_cap_from_api_kwargs(api_kwargs), n
         )

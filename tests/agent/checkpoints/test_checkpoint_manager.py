@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import pytest
 from pathlib import Path
@@ -157,6 +158,29 @@ class TestTakeCheckpoint:
         mgr.new_turn()
         (work_dir / "main.py").write_text("print('modified')\n")
         assert mgr.ensure_checkpoint(str(work_dir), "turn 2") is True
+
+    def test_shared_temp_root_is_refused_but_subdirectory_is_allowed(
+        self, checkpoint_base, tmp_path,
+    ):
+        m = CheckpointManager(enabled=True)
+        assert m.ensure_checkpoint("/tmp", "shared /tmp") is False
+        assert m.ensure_checkpoint(tempfile.gettempdir(), "shared temp") is False
+
+        project = tmp_path / "checkpointable"
+        project.mkdir()
+        (project / "main.py").write_text("x = 1\n", encoding="utf-8")
+        assert m.ensure_checkpoint(str(project), "temp subdirectory") is True
+        projects = checkpoint_base / "store" / "projects"
+        assert not (projects / f"{_project_hash('/tmp')}.json").exists()
+        assert not (projects / f"{_project_hash(tempfile.gettempdir())}.json").exists()
+        assert (projects / f"{_project_hash(str(project))}.json").exists()
+
+    def test_nonexistent_working_directory_is_not_registered(self, checkpoint_base, tmp_path):
+        missing = tmp_path / "not-created"
+        m = CheckpointManager(enabled=True)
+
+        assert m.ensure_checkpoint(str(missing), "missing") is False
+        assert not (checkpoint_base / "store").exists()
 
 
 # =========================================================================
@@ -724,6 +748,16 @@ class TestWorkingDirResolution:
         filepath.write_text("x\n", encoding="utf-8")
         (fake_home / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
         assert m.get_working_dir_for_path(str(filepath)) == str(filepath.parent)
+
+    def test_nonexistent_leaf_resolves_from_nearest_existing_ancestor(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+
+        m = CheckpointManager(enabled=True)
+        target = project / "deploy" / "nested" / "config.yaml"
+
+        assert m.get_working_dir_for_path(str(target)) == str(project)
 
 
 # =========================================================================

@@ -832,6 +832,7 @@ const sidebars: SidebarsConfig = {
             'developer-guide/chronos-managed-cron-contract',
             'developer-guide/egress-internals',
             'developer-guide/gateway-monitoring',
+            'developer-guide/gateway-error-clusters-2026-11-28',
             'developer-guide/relay-connector-contract',
             'developer-guide/relay-shared-metrics',
             'developer-guide/streaming-tts',

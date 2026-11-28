@@ -3118,7 +3118,8 @@ class _StreamingCall(StreamingWaitMonitor):
                     pending = "".join(pending_text_parts)
                     if not (_provider_stream_text_may_be_sse(pending) or router_timeout_shim_may_follow(pending)):
                         _flush_pending_stream_text()
-                    continue
+                    # The same chunk may carry the first tool-call delta (id,
+                    # name, and initial argument bytes); process it below.
                 else:
                     self._emit_text(delta_content)
 
@@ -3191,6 +3192,14 @@ class _StreamingCall(StreamingWaitMonitor):
         for idx in sorted(tool_calls_acc):
             tc = tool_calls_acc[idx]
             arguments = tc["function"]["arguments"]
+            if not tc["function"]["name"] and arguments:
+                logger.warning(
+                    "tool_call_header_lost: slot=%d id=%r args_len=%d starts_with_brace=%s "
+                    "finish_reason=%s — name/first argument bytes never arrived; response "
+                    "discarded and retried (tool NOT invoked)",
+                    idx, tc["id"] or "?", len(arguments), arguments.lstrip().startswith("{"), finish_reason,
+                )
+                has_truncated_tool_args = True
             if arguments and arguments.strip():
                 try:
                     json.loads(arguments)
@@ -3201,7 +3210,9 @@ class _StreamingCall(StreamingWaitMonitor):
                         has_truncated_tool_args = True
                     else:
                         # Repair before flagging (GLM via Ollama); "{}" = unrepairable.
-                        repaired = _repair_tool_call_arguments(arguments, tc["function"]["name"] or "?")
+                        repaired = _repair_tool_call_arguments(
+                            arguments, tc["function"]["name"] or "?", site="stream"
+                        )
                         if repaired != "{}":
                             arguments = repaired
                         else:

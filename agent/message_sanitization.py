@@ -229,7 +229,7 @@ def _rebalance_json_closers(raw: str) -> str | None:
     return "".join(out) + "".join(_JSON_CLOSERS[ch] for ch in reversed(stack))
 
 
-def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
+def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?", *, site: str = "history") -> str:
     """Repair malformed tool_call argument JSON (truncation, trailing commas, Python ``None``,
     control chars); ``"{}"`` if unrepairable so the request succeeds. Repairs log at WARNING."""
     raw_stripped = raw_args.strip() if isinstance(raw_args, str) else ""
@@ -280,10 +280,18 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
         )
         return escaped
 
-    logger.warning(
-        "Unrepairable tool_call arguments for %s — replaced with empty object (was: %s)",
-        tool_name, raw_stripped[:_FULL_ARGS_LOG_BOUND],
-    )
+    if site == "stream":
+        logger.warning(
+            "tool_call_args_unrepairable: site=stream tool=%s len=%d starts_with_brace=%s "
+            "tail_closed=%s — response will be discarded and retried",
+            tool_name, len(raw_stripped), raw_stripped.startswith("{"), raw_stripped.endswith("}"),
+        )
+    else:
+        logger.warning(
+            "tool_call_args_unrepairable: site=history tool=%s — replaced with {} on the wire "
+            "copy only (was: %s)",
+            tool_name, raw_stripped[:_FULL_ARGS_LOG_BOUND],
+        )
     return "{}"
 
 
