@@ -3907,6 +3907,25 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if not AIOHTTP_AVAILABLE:
             logger.warning("[%s] aiohttp not installed", self.name)
             return False
+
+        # Defense-in-depth (#735 durable fix, re-applied from fork main): a
+        # profile whose config sets ``platforms.api_server.enabled: false``
+        # must never attempt this at all. Observed live: a profile gateway
+        # with enabled=false still reached this method and WON the scoped
+        # port-lock race below, leaving it — not main — serving 8642, while
+        # main logged a permanent (non-recoverable) "port already in use"
+        # error every retry-backoff cycle forever. Whatever upstream call
+        # path lets a disabled platform reach connect(), stop it here rather
+        # than only at the lock: this is the one place that can see this
+        # adapter's own config.enabled and refuse outright.
+        if not getattr(self.config, "enabled", True):
+            logger.debug(
+                "[%s] connect() called but platforms.api_server.enabled is "
+                "false — refusing to start (see #735).",
+                self.name,
+            )
+            return False
+
         with self._session_db_cache_lock:
             self._session_db_cache_closed = False
         if not self._api_key_passes_startup_guard():
